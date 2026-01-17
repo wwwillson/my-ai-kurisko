@@ -10,7 +10,7 @@ import requests
 # 1. 頁面與設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 短線狙擊")
-st.title("🛡️ John Kurisko 短線狙擊 (自動標記買賣點)")
+st.title("🛡️ John Kurisko 短線狙擊 (穩定版)")
 
 # 自動刷新設定
 with st.sidebar:
@@ -46,6 +46,7 @@ def calculate_stoch(df, k_period, d_period, smooth_k):
 
 def get_data(symbol, interval, ema_params):
     try:
+        # 抓取數據
         period = "1mo" if interval == "15m" else "6mo"
         df = yf.download(symbol, period=period, interval=interval, progress=False)
         
@@ -55,8 +56,9 @@ def get_data(symbol, interval, ema_params):
         if df.empty: return None, "No Data"
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         
-        # 清洗數據
-        df = df[df['Close'] > 0].dropna()
+        # 清洗數據 (防止 0 或 NaN 導致圖表報錯)
+        df = df[df['Close'] > 0]
+        df = df.dropna()
 
         # 指標計算
         df['EMA_20'] = calculate_ema(df['Close'], ema_params[0])
@@ -78,39 +80,27 @@ def get_data(symbol, interval, ema_params):
 # 3. 訊號邏輯 (生成標記點)
 # ==========================================
 def generate_signals(df, slow_threshold):
-    # 建立兩個空的列表來存放買賣點價格
     buy_signals = []
     sell_signals = []
-    
     current_signal_status = "無訊號"
 
     for i in range(len(df)):
         row = df.iloc[i]
         
-        # 1. 牛旗買點 (做多)
-        # 條件: 價格 > 200 & 50 EMA (趨勢向上)
-        # 慢速 Stoch > 門檻 (動能強)
-        # 快速 Stoch < 25 (回調到位)
+        # 1. 牛旗買點
         is_uptrend = (row['Close'] > row['EMA_200']) and (row['Close'] > row['EMA_50'])
         slow_strong = row['Stoch4_K'] > slow_threshold
         fast_dip = row['Stoch1_K'] < 25
         
         if is_uptrend and slow_strong and fast_dip:
-            # 標記在最低價下方一點點 (0.999)
             buy_signals.append(row['Low'] * 0.999)
             sell_signals.append(np.nan)
-            # 如果這是最後一根 K 線，更新狀態文字
             if i == len(df) - 1: current_signal_status = "🔥 牛旗買點 (做多)"
         
-        # 2. 熊旗賣點 (做空)
-        # 條件: 價格 < 200 & 50 EMA (趨勢向下)
-        # 慢速 Stoch < (100 - 門檻) (動能極弱)
-        # 快速 Stoch > 75 (反彈到位)
+        # 2. 熊旗賣點
         elif (row['Close'] < row['EMA_200']) and (row['Close'] < row['EMA_50']) and \
              (row['Stoch4_K'] < (100 - slow_threshold)) and (row['Stoch1_K'] > 75):
-            
             buy_signals.append(np.nan)
-            # 標記在最高價上方一點點 (1.001)
             sell_signals.append(row['High'] * 1.001)
             if i == len(df) - 1: current_signal_status = "❄️ 熊旗賣點 (做空)"
             
@@ -140,10 +130,7 @@ if should_run:
         if err:
             st.error(err)
         elif df is not None:
-            # 只取最近 60 根來畫圖，讓 K 線清楚
             plot_df = df.tail(60).copy()
-            
-            # 產生訊號標記 (針對這 60 根)
             buys, sells, status = generate_signals(plot_df, slow_stoch_threshold)
             
             # --- 數據看板 ---
@@ -161,22 +148,28 @@ if should_run:
             c1.metric("趨勢強度 (慢速)", f"{curr['Stoch4_K']:.1f}")
             c2.metric("入場扳機 (快速)", f"{curr['Stoch1_K']:.1f}")
 
-            # --- 繪圖設定 ---
+            # --- 繪圖設定 (修正版) ---
+            # 先建立基礎指標 (EMA & Stoch)
             apds = [
-                # EMA
                 mpf.make_addplot(plot_df['EMA_20'], color='cyan', width=1),
                 mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1.5),
                 mpf.make_addplot(plot_df['EMA_200'], color='white', width=2),
-                
-                # 買賣點標記 (Scatter)
-                mpf.make_addplot(buys, type='scatter', markersize=100, marker='^', color='yellow'), # 買點 ▲
-                mpf.make_addplot(sells, type='scatter', markersize=100, marker='v', color='#ff00ff'), # 賣點 ▼
-                
-                # Stochastics (副圖)
                 mpf.make_addplot(plot_df['Stoch1_K'], panel=1, color='#FF3333', width=1.5, ylabel='Stoch'),
                 mpf.make_addplot(plot_df['Stoch4_K'], panel=1, color='#33FF33', width=2.0),
             ]
+
+            # --- 關鍵修正：只有當列表中不全是 NaN 時，才加入散點圖 ---
+            # 這是解決 numpy error 的核心邏輯
             
+            # 檢查買點
+            if not np.isnan(buys).all():
+                apds.append(mpf.make_addplot(buys, type='scatter', markersize=100, marker='^', color='yellow'))
+            
+            # 檢查賣點
+            if not np.isnan(sells).all():
+                apds.append(mpf.make_addplot(sells, type='scatter', markersize=100, marker='v', color='#ff00ff'))
+
+            # 繪製
             fig, ax = mpf.plot(
                 plot_df, type='candle', style='yahoo', addplot=apds,
                 title=f"{symbol} ({timeframe}) - Signals",
@@ -184,5 +177,4 @@ if should_run:
                 hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle='--', linewidths=1.0)
             )
             st.pyplot(fig)
-            
-            st.caption("圖例： ▲ 黃色三角 = 牛旗買多 (Trend Up + Dip) | ▼ 紫色三角 = 熊旗做空 (Trend Down + Rally)")
+            st.caption("圖例： ▲ 黃色三角 = 牛旗買多 | ▼ 紫色三角 = 熊旗做空 (若無箭頭代表近期無訊號)")
