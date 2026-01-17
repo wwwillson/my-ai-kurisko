@@ -3,4 +3,3 @@ yfinance
 mplfinance
 pandas
 numpy
-pandas_ta
