@@ -10,7 +10,7 @@ import requests
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (間距優化版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (間距完美修正版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -53,6 +53,7 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
+        # 15m 抓 60天, 1h/4h 抓 2年
         period = "5d" 
         if interval == "15m": period = "60d" 
         elif interval == "1h": period = "730d" 
@@ -154,7 +155,7 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
     except: pass
 
 # ==========================================
-# 5. 主程式與繪圖 (核心 UI 修復)
+# 5. 主程式與繪圖 (佈局修正核心)
 # ==========================================
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
@@ -224,6 +225,7 @@ if should_run:
                 apds.append(mpf.make_addplot(s_s, color='red', width=0.5))
                 apds.append(mpf.make_addplot(e_s, fill_between=dict(y1=e_s.tolist(), y2=s_s.tolist(), color='red', alpha=0.15), width=0))
 
+            # 參數打包
             plot_kwargs = dict(
                 type='candle', 
                 style=mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)), 
@@ -231,14 +233,13 @@ if should_run:
                 title=f"{symbol} ({timeframe})",
                 returnfig=True, 
                 volume=False, 
-                panel_ratios=(4, 1, 1, 1, 1),
+                panel_ratios=(3, 1, 1, 1, 1), # 主圖:副圖比例
                 tight_layout=True,
                 datetime_format='%H:%M',
                 xrotation=0,
-                # 修正重點: 增加 figscale (例如 1.5)，將圖表高度拉長
-                # 這會讓每個 panel 之間的距離物理變大
-                figscale=1.5, 
-                hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.8)
+                # 修正 1: 大幅增加 figscale (從 1.5 -> 2.0)
+                figscale=2.0, 
+                hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
             )
 
             if div_pts:
@@ -247,10 +248,8 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 關鍵修正：增加子圖間距 ---
-            # hspace=0.4 代表子圖之間保留 40% 的高度間距
-            # 這能有效分開 0 和 100
-            fig.subplots_adjust(hspace=0.4)
+            # 修正 2: 增加 hspace (子圖間距) 到 0.5 (原本預設極小)
+            fig.subplots_adjust(hspace=0.5)
 
             curr_row = plot_df.iloc[-1]
             panels_info = [
@@ -265,12 +264,15 @@ if should_run:
                     ax = axlist[ax_idx]
                     ax.set_ylim(0, 100)
                     ax.set_yticks([0, 25, 50, 75, 100])
-                    # 使用較小的字體 (8) 避免重疊
-                    ax.set_yticklabels([0, 25, 50, 75, 100], fontsize=8) 
+                    
+                    # 修正 3: 字體縮小至 7
+                    ax.set_yticklabels([0, 25, 50, 75, 100], fontsize=7) 
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
-                    ax.text(0.01, 0.85, label_text, transform=ax.transAxes, 
-                            color=color, fontsize=10, fontweight='bold', ha='left')
+                    
+                    # 標籤稍微往上移一點 (0.9) 避免遮到線
+                    ax.text(0.01, 0.9, label_text, transform=ax.transAxes, 
+                            color=color, fontsize=9, fontweight='bold', ha='left')
 
             st.pyplot(fig)
             
