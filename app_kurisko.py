@@ -10,7 +10,7 @@ import requests
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (UI完美對齊版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (UI 完美對齊版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -45,6 +45,7 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
     high_max = df['High'].rolling(window=k_period).max()
     denom = high_max - low_min
     denom = denom.replace(0, 0.000001)
+    
     r_k = 100 * ((df['Close'] - low_min) / denom)
     k_full = r_k.rolling(window=smooth_k).mean()
     d_full = k_full.rolling(window=smooth_d).mean()
@@ -52,6 +53,7 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
+        # 數據抓取
         period = "5d" 
         if interval == "15m": period = "60d" 
         elif interval == "1h": period = "730d" 
@@ -153,7 +155,7 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
     except: pass
 
 # ==========================================
-# 5. 主程式與繪圖 (UI 優化核心)
+# 5. 主程式與繪圖 (核心 UI 修復)
 # ==========================================
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
@@ -230,13 +232,14 @@ if should_run:
                 title=f"{symbol} ({timeframe})",
                 returnfig=True, 
                 volume=False, 
-                panel_ratios=(3, 1, 1, 1, 1),
+                panel_ratios=(4, 1, 1, 1, 1),
                 tight_layout=True,
-                # 修正重點 1: X 軸時間格式 (只顯示時間，不旋轉)
-                datetime_format='%H:%M', 
+                # 修正 1: 時間格式 (時:分)
+                datetime_format='%H:%M',
                 xrotation=0,
-                # 修正重點 2: 畫出 25, 75 虛線 (輔助線)
-                hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.8)
+                # 修正 2: 拉長圖表 (figscale) 解決刻度重疊
+                figscale=1.35, 
+                hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
             )
 
             if div_pts:
@@ -245,12 +248,9 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 深度客製化 Axes (解決刻度不對齊) ---
+            # --- 客製化 Axes (解決刻度重疊) ---
             curr_row = plot_df.iloc[-1]
             
-            # 定義副圖資訊: (Axes索引, 標籤文字, 顏色)
-            # axlist[0]=Main, axlist[1]=Main_Secondary...
-            # 通常副圖的 Primary Axis 是偶數索引: 2, 4, 6, 8
             panels_info = [
                 (2, f"Stoch 9 3 1  {curr_row['K1']:.2f}", '#FF4444'),
                 (4, f"Stoch 14 3 1  {curr_row['K2']:.2f}", '#FF8800'),
@@ -262,18 +262,14 @@ if should_run:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
                     
-                    # 修正重點 3: 強制固定 Y 軸範圍與刻度
+                    # 修正 3: 固定 Y 軸刻度並縮小字體
                     ax.set_ylim(0, 100)
                     ax.set_yticks([0, 25, 50, 75, 100])
-                    ax.set_yticklabels([0, 25, 50, 75, 100], fontsize=9)
-                    
-                    # 確保刻度在右邊
+                    ax.set_yticklabels([0, 25, 50, 75, 100], fontsize=8) # 字體縮小到 8
                     ax.yaxis.tick_right()
-                    
-                    # 移除外部 Y 軸標題
                     ax.set_ylabel("")
                     
-                    # 標籤內移
+                    # 圖內標籤
                     ax.text(0.01, 0.85, label_text, transform=ax.transAxes, 
                             color=color, fontsize=10, fontweight='bold', ha='left')
 
