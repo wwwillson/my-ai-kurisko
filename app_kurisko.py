@@ -10,20 +10,19 @@ import requests
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (四重輪動 + 自動背離畫線)")
+st.title("🛡️ John Kurisko 專業操盤系統 (四重輪動 + 背離)")
 
-# 隱藏式說明
 with st.expander("📖 策略邏輯與圖表說明 (點擊展開)", expanded=False):
     st.markdown("""
     ### 1️⃣ 策略 A：四重共振背離反轉 (Reversal)
-    *   **環境**：**4 個 Stochastics 全部** 進入超賣區 (< 20-30) 或 超買區 (> 70-80)。
+    *   **環境**：**4 個 Stochastics 全部** 進入超賣區 (< 35) 或 超買區 (> 65)。
     *   **觸發**：
-        *   **多頭 (Bull)**：價格創新低 (Lower Low)，但 Stoch 9,3 創新高 (Higher Low) -> **畫出黃色底背離線**。
-        *   **空頭 (Bear)**：價格創新高 (Higher High)，但 Stoch 9,3 創新低 (Lower High) -> **畫出黃色頂背離線**。
+        *   **多頭 (Bull)**：價格創新低，但 Stoch 9,3 創新高 (底背離) -> **畫出黃色底背離線**。
+        *   **空頭 (Bear)**：價格創新高，但 Stoch 9,3 創新低 (頂背離) -> **畫出黃色頂背離線**。
     
     ### 2️⃣ 策略 B：趨勢中繼 (Trend Continuation)
-    *   **多頭**：價格 > 200 EMA，慢速 Stoch (60,10) 強勢 (>50)，快速 Stoch 回調。
-    *   **空頭**：價格 < 200 EMA，慢速 Stoch (60,10) 弱勢 (<50)，快速 Stoch 反彈。
+    *   **多頭**：價格 > 200 EMA，慢速 Stoch 強勢，快速 Stoch 回調。
+    *   **空頭**：價格 < 200 EMA，慢速 Stoch 弱勢，快速 Stoch 反彈。
     """)
 
 # ==========================================
@@ -66,15 +65,16 @@ def calculate_stoch(df, k_period, d_period, smooth_k):
 def get_data(symbol, interval):
     try:
         # 增加數據抓取量以確保 EMA 200 能計算出來
-        period = "3mo" if interval == "15m" else "1y" 
-        if interval == "4h": period = "2y"
+        period = "5d" if interval == "15m" else "1mo" # 15m 抓5天就很多了，避免 yf 卡住
+        if interval == "1h": period = "3mo"
+        if interval == "4h": period = "6mo"
         
         df = yf.download(symbol, period=period, interval=interval, progress=False)
         
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         
-        if df.empty: return None, "No Data"
+        if df.empty: return None, "無法抓取數據，請稍後再試。"
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         
         df = df[df['Close'] > 0].dropna()
@@ -96,7 +96,7 @@ def get_data(symbol, interval):
         return None, str(e)
 
 # ==========================================
-# 4. 高階訊號分析 (含背離座標計算)
+# 4. 高階訊號分析
 # ==========================================
 
 def analyze_signals(df):
@@ -104,69 +104,54 @@ def analyze_signals(df):
     
     # 搜尋範圍 (找 Pivot)
     lookback = 40 
-    past_df = df.iloc[-lookback:-1] # 不含當前 K 線
+    past_df = df.iloc[-lookback:-1] 
     
     signal_type = None
     strategy_name = ""
     reason = ""
     
-    # 用於畫背離線的座標 [(日期1, 數值1), (日期2, 數值2)]
-    div_line_price = [] 
-    div_line_stoch = []
+    # 為了避免 mplfinance 的 alines 報錯，我們改用最穩定的 addplot 畫線
+    # 這裡我們只回傳是否畫背離線的旗標
+    div_points = None
 
-    # ----------------------------------------------
-    # 策略 A: 四重共振背離 (Reversal) - 優先判斷
-    # ----------------------------------------------
-    # 條件 1: 檢查四個指標是否都在低檔 (例如 < 35 寬鬆一點，確保能抓到)
+    # --- 策略 A: 四重共振背離 ---
     all_oversold = (curr['Stoch_9_3'] < 35) and (curr['Stoch_14_3'] < 35) and \
                    (curr['Stoch_44_4'] < 35) and (curr['Stoch_60_10'] < 35)
     
     all_overbought = (curr['Stoch_9_3'] > 65) and (curr['Stoch_14_3'] > 65) and \
                      (curr['Stoch_44_4'] > 65) and (curr['Stoch_60_10'] > 65)
 
-    # 條件 2: 背離偵測
     if all_oversold:
-        # 找過去最低價
         min_price_idx = past_df['Low'].idxmin()
         min_price = past_df.loc[min_price_idx, 'Low']
         stoch_at_min = df.loc[min_price_idx, 'Stoch_9_3']
         
-        # 底背離: 價格創新低 (LL) 且 Stoch 9,3 墊高 (HL) 且 Stoch 黃金交叉向上
-        if (curr['Low'] < min_price) and (curr['Stoch_9_3'] > stoch_at_min) and (curr['Stoch_9_3'] > df.iloc[-2]['Stoch_9_3']):
+        if (curr['Low'] < min_price) and (curr['Stoch_9_3'] > stoch_at_min):
             signal_type = "LONG"
             strategy_name = "策略 A: 四重共振底背離"
             reason = "4指標低檔 + 價格破底 + Stoch墊高"
-            # 紀錄畫線座標
-            div_line_price = [(min_price_idx, min_price), (df.index[-1], curr['Low'])]
-            div_line_stoch = [(min_price_idx, stoch_at_min), (df.index[-1], curr['Stoch_9_3'])]
+            # 紀錄背離線的兩個時間點 (用於後續畫線)
+            div_points = (min_price_idx, df.index[-1], min_price, curr['Low'])
 
     elif all_overbought:
-        # 找過去最高價
         max_price_idx = past_df['High'].idxmax()
         max_price = past_df.loc[max_price_idx, 'High']
         stoch_at_max = df.loc[max_price_idx, 'Stoch_9_3']
         
-        # 頂背離: 價格創新高 (HH) 且 Stoch 9,3 降低 (LH)
-        if (curr['High'] > max_price) and (curr['Stoch_9_3'] < stoch_at_max) and (curr['Stoch_9_3'] < df.iloc[-2]['Stoch_9_3']):
+        if (curr['High'] > max_price) and (curr['Stoch_9_3'] < stoch_at_max):
             signal_type = "SHORT"
             strategy_name = "策略 A: 四重共振頂背離"
             reason = "4指標高檔 + 價格破頂 + Stoch降低"
-            # 紀錄畫線座標
-            div_line_price = [(max_price_idx, max_price), (df.index[-1], curr['High'])]
-            div_line_stoch = [(max_price_idx, stoch_at_max), (df.index[-1], curr['Stoch_9_3'])]
+            div_points = (max_price_idx, df.index[-1], max_price, curr['High'])
 
-    # ----------------------------------------------
-    # 策略 B: 趨勢中繼 (Trend Continuation)
-    # ----------------------------------------------
+    # --- 策略 B: 趨勢中繼 ---
     if signal_type is None:
-        # 牛旗
         if (curr['Close'] > curr['EMA_200']) and (curr['Stoch_60_10'] > 50):
             if curr['Stoch_9_3'] < 25:
                 signal_type = "LONG"
                 strategy_name = "策略 B: 趨勢牛旗"
                 reason = "EMA多頭 + 慢速強 + 快速回調"
         
-        # 熊旗
         elif (curr['Close'] < curr['EMA_200']) and (curr['Stoch_60_10'] < 50):
             if curr['Stoch_9_3'] > 75:
                 signal_type = "SHORT"
@@ -187,7 +172,7 @@ def analyze_signals(df):
         sl = swing_high * 1.005
         tp = entry - (sl - entry) * 3
 
-    return signal_type, strategy_name, reason, entry, sl, tp, div_line_price, div_line_stoch
+    return signal_type, strategy_name, reason, entry, sl, tp, div_points
 
 # ==========================================
 # 5. 主程式與繪圖
@@ -201,13 +186,10 @@ if should_run:
         if err:
             st.error(err)
         elif df is not None:
-            # 畫圖數據 (取最近 80 根，確保背離點在畫面內)
-            plot_df = df.tail(80).copy()
+            plot_df = df.tail(80).copy() # 只取最近 80 根
             
-            # 分析
-            signal, strat_name, reason, entry, sl, tp, div_price, div_stoch = analyze_signals(df)
+            signal, strat_name, reason, entry, sl, tp, div_pts = analyze_signals(df)
             
-            # 顯示看板
             curr_price = df.iloc[-1]['Close']
             st.metric("目前價格", f"{curr_price:.2f}")
             
@@ -227,15 +209,8 @@ if should_run:
                 st.info("目前無明確進場訊號。")
 
             # --- 繪圖設定 (5面板) ---
-            # Panel 0: Main
-            # Panel 1: Stoch 9,3 (Trigger)
-            # Panel 2: Stoch 14,3
-            # Panel 3: Stoch 44,4
-            # Panel 4: Stoch 60,10
-            
             apds = [
-                # EMA (主圖) - 加粗顯示
-                mpf.make_addplot(plot_df['EMA_20'], color='cyan', width=1.0),
+                # 主圖 EMA
                 mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1.5),
                 mpf.make_addplot(plot_df['EMA_200'], color='white', width=2.0),
                 
@@ -245,18 +220,6 @@ if should_run:
                 mpf.make_addplot(plot_df['Stoch_44_4'], panel=3, color='#00AAFF', width=1.5, ylabel='44,4'),
                 mpf.make_addplot(plot_df['Stoch_60_10'], panel=4, color='#55FF55', width=1.5, ylabel='60,10'),
             ]
-
-            # --- 畫背離線與色塊 (關鍵升級) ---
-            # 這裡使用 alines 來畫線
-            # alines 格式: [ [(date1, val1), (date2, val2)], ... ]
-            
-            alines_config = []
-            
-            if signal and div_price:
-                # 1. 在主圖畫價格背離線 (黃色粗線)
-                alines_config.append(dict(alines=[div_price], colors=['yellow'], linewidths=2.5, panel=0))
-                # 2. 在副圖1畫指標背離線 (黃色粗線)
-                alines_config.append(dict(alines=[div_stoch], colors=['yellow'], linewidths=2.5, panel=1))
 
             # 畫止盈止損色塊
             if signal:
@@ -270,23 +233,31 @@ if should_run:
                 apds.append(mpf.make_addplot(s_series, color='red', width=0.5))
                 apds.append(mpf.make_addplot(e_series, fill_between=dict(y1=e_series.tolist(), y2=s_series.tolist(), color='red', alpha=0.1), width=0))
 
+            # --- 修正重點：使用 alines 來畫背離線 (避免 TypeError) ---
+            # 我們將 div_pts 轉換為 mplfinance 接受的格式
+            alines_config = None
+            if div_pts:
+                # 格式: [(date1, price1), (date2, price2)]
+                # 注意：mplfinance 需要 Timestamp 作為 X 軸
+                p1_date, p2_date, p1_val, p2_val = div_pts
+                alines_config = [(p1_date, p1_val), (p2_date, p2_val)]
+
             # 繪製
-            fig, ax = mpf.plot(
-                plot_df, type='candle', style='yahoo', 
+            # 如果有背離線，傳入 alines 參數；否則不傳
+            kwargs = dict(
+                type='candle', style='yahoo', 
                 addplot=apds,
                 title=f"{symbol} ({timeframe}) Quad Rotation",
                 returnfig=True, volume=False, 
-                panel_ratios=(6, 1.5, 1.5, 1.5, 1.5), # 調整比例
+                panel_ratios=(6, 1.5, 1.5, 1.5, 1.5),
                 tight_layout=True,
-                # 傳入多個 alines 配置
-                alines=dict(alines=div_price if div_price else [], colors='yellow', linewidths=2, panel=0) if div_price else None,
-                # 畫出 20/80 線
                 hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle='--', linewidths=0.5, alpha=0.5)
             )
             
-            # 手動補上副圖的背離線 (因為 mplfinance 的 alines 參數有時候對多面板支援度有限，這裡主要確保主圖有線)
-            # 上面的 alines 參數已經處理了主圖的線。
-            
+            if alines_config:
+                kwargs['alines'] = dict(alines=alines_config, colors='yellow', linewidths=2.5)
+
+            fig, ax = mpf.plot(plot_df, **kwargs)
             st.pyplot(fig)
             
             if signal:
