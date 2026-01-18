@@ -7,25 +7,47 @@ from streamlit_autorefresh import st_autorefresh
 import requests
 
 # ==========================================
-# 1. 頁面與設定
+# 1. 頁面設定與策略邏輯說明
 # ==========================================
-st.set_page_config(layout="wide", page_title="John Kurisko 背離偵測系統")
-st.title("🛡️ John Kurisko 背離偵測系統 (Divergence)")
+st.set_page_config(layout="wide", page_title="John Kurisko 趨勢回調策略")
+st.title("🛡️ John Kurisko 趨勢回調策略 (Trend Pullback)")
 
+# 顯示策略邏輯 (根據影片 2:45 與 4:45)
+st.info("""
+### 🧠 策略判斷邏輯 (基於影片)
+
+#### 📈 2:45 多頭進場 (Long Setup) - 順勢買進
+1.  **趨勢判斷**：價格必須在 **50 EMA** 與 **200 EMA** 之上 (明確上升趨勢)。
+2.  **回調訊號**：快速隨機指標 (Stoch 9,3) 跌入 **超賣區 (< 20)**。
+3.  **進場點**：當上述條件滿足時，視為潛在買點。
+4.  **止損 (SL)**：設置在最近的波段低點 (Swing Low)。
+5.  **止盈 (TP)**：設置為止損距離的 3 倍 (風險回報比 1:3)。
+
+#### 📉 4:45 空頭進場 (Short Setup) - 順勢做空
+1.  **趨勢判斷**：價格必須在 **50 EMA** 與 **200 EMA** 之下 (明確下降趨勢)。
+2.  **反彈訊號**：快速隨機指標 (Stoch 9,3) 衝上 **超買區 (> 80)**。
+3.  **進場點**：當上述條件滿足時，視為潛在賣點。
+4.  **止損 (SL)**：設置在最近的波段高點 (Swing High)。
+5.  **止盈 (TP)**：設置為止損距離的 3 倍 (風險回報比 1:3)。
+""")
+
+# ==========================================
+# 2. 系統設定
+# ==========================================
 with st.sidebar:
-    st.markdown("---")
-    st.header("⚙️ 系統設定")
-    enable_refresh = st.checkbox("開啟自動刷新 (60s)", value=False)
-    line_token = st.text_input("Line Token (選填)", type="password")
+    st.header("⚙️ 參數設定")
+    symbol = st.text_input("監控代號", value="BTC-USD")
+    timeframe = st.selectbox("週期", ["15m", "1h"], index=0)
     
     st.markdown("---")
-    st.info("此版本專注於偵測「價格」與「Stoch動量」的背離現象。")
+    enable_refresh = st.checkbox("開啟自動刷新 (60s)", value=False)
+    line_token = st.text_input("Line Token (選填)", type="password")
 
 if enable_refresh:
     count = st_autorefresh(interval=60000, limit=None, key="refresh_counter")
 
 # ==========================================
-# 2. 運算函數
+# 3. 核心運算函數
 # ==========================================
 
 def send_line_notify(token, msg):
@@ -63,11 +85,10 @@ def get_data(symbol, interval):
         df['EMA_20'] = calculate_ema(df['Close'], 20)
         df['EMA_50'] = calculate_ema(df['Close'], 50)
         df['EMA_200'] = calculate_ema(df['Close'], 200)
-
-        # 影片重點：快速線 (Fast Stoch) 用來找背離
+        
+        # 影片核心：Stoch (9,3,1)
         df['Stoch_Fast'] = calculate_stoch(df, 9, 1, 3) 
-        # 慢速線用來參考趨勢
-        df['Stoch_Slow'] = calculate_stoch(df, 60, 1, 10) 
+        df['Stoch_Slow'] = calculate_stoch(df, 60, 1, 10) # 輔助看大趨勢
 
         df = df.dropna()
         return df, None
@@ -75,88 +96,54 @@ def get_data(symbol, interval):
         return None, str(e)
 
 # ==========================================
-# 3. 核心邏輯：背離偵測 (Divergence Logic)
+# 4. 訊號與止盈止損計算 (Risk/Reward Logic)
 # ==========================================
-def detect_divergence(df, window=5):
+def analyze_setup(df):
     """
-    偵測背離演算法：
-    1. 找出局部的價格高點/低點 (Pivot High/Low)。
-    2. 找出對應時間點的 Stoch 值。
-    3. 比對：
-       - 頂背離 (Bearish): 價格創新高 (HH) + Stoch 沒創新高 (LH)
-       - 底背離 (Bullish): 價格創新低 (LL) + Stoch 沒創新低 (HL)
+    只分析「最後一根 K 線」是否符合條件。
+    如果符合，計算 SL (止損) 與 TP (止盈) 的價格。
     """
-    buy_signals = [np.nan] * len(df)
-    sell_signals = [np.nan] * len(df)
-    status = "無訊號"
-
-    # 我們需要遍歷尋找 Pivot
-    # 為了效率，我們只檢查每一個點是否是過去 N 根和未來 N 根的極值 (這在實時中只能檢查過去)
-    # 這裡採用實時模擬：只比對「當前 K 線」與「過去某個波段高點」
+    curr = df.iloc[-1]
+    prev_5 = df.iloc[-6:-1] # 拿前5根來找波段高低點
     
-    # 找出所有的波段高低點索引
-    highs = df['High'].values
-    lows = df['Low'].values
-    stochs = df['Stoch_Fast'].values
-    
-    # 用於儲存過去的波段點 (Index, Price, StochValue)
-    pivot_highs = [] 
-    pivot_lows = []
-    
-    for i in range(window, len(df) - 1): # 預留空間
-        # --- 1. 識別波段高點 (Pivot High) ---
-        # 簡單定義：中間比左右兩邊都高 (類似分形)
-        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
-            # 這是潛在的波段高點
-            current_high_price = highs[i]
-            current_high_stoch = stochs[i]
-            
-            # 檢查是否構成頂背離 (與上一個波段高點比較)
-            if len(pivot_highs) > 0:
-                last_idx, last_price, last_stoch = pivot_highs[-1]
-                
-                # 距離不能太遠 (例如 60 根以內)，也不能太近 (至少隔 5 根)
-                if 5 < (i - last_idx) < 60:
-                    # 條件：價格創新高 (Price High > Prev Price High)
-                    # 條件：指標沒創新高 (Stoch < Prev Stoch)
-                    # 過濾：Stoch 必須在超買區 (例如 > 70) 才有意義
-                    if current_high_price > last_price and current_high_stoch < last_stoch and current_high_stoch > 70:
-                        sell_signals[i] = highs[i] * 1.002 # 標記在 K 線上方
-                        if i >= len(df) - 3: status = "❄️ 看空背離 (Bearish Divergence)"
-            
-            pivot_highs.append((i, current_high_price, current_high_stoch))
+    setup_type = None
+    entry_price = curr['Close']
+    stop_loss = 0.0
+    take_profit = 0.0
+    reason = ""
 
-        # --- 2. 識別波段低點 (Pivot Low) ---
-        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
-            current_low_price = lows[i]
-            current_low_stoch = stochs[i]
+    # --- 條件 1: 做多 (Long) ---
+    # 價格 > 50 & 200 EMA 且 Stoch < 20
+    if (curr['Close'] > curr['EMA_50']) and (curr['Close'] > curr['EMA_200']):
+        if curr['Stoch_Fast'] < 20:
+            setup_type = "LONG"
+            # 止損設在最近 5 根 K 線的最低點再低一點點
+            swing_low = prev_5['Low'].min()
+            stop_loss = swing_low if swing_low < curr['Low'] else curr['Low'] * 0.995
             
-            if len(pivot_lows) > 0:
-                last_idx, last_price, last_stoch = pivot_lows[-1]
-                
-                if 5 < (i - last_idx) < 60:
-                    # 條件：價格創新低 (Price Low < Prev Price Low)
-                    # 條件：指標沒創新低 (Stoch > Prev Stoch)
-                    # 過濾：Stoch 必須在超賣區 (例如 < 30)
-                    if current_low_price < last_price and current_low_stoch > last_stoch and current_low_stoch < 30:
-                        buy_signals[i] = lows[i] * 0.998 # 標記在 K 線下方
-                        if i >= len(df) - 3: status = "🔥 看多背離 (Bullish Divergence)"
-            
-            pivot_lows.append((i, current_low_price, current_low_stoch))
+            risk = entry_price - stop_loss
+            take_profit = entry_price + (risk * 3) # 3倍盈虧比
+            reason = "趨勢向上 + Stoch超賣回調"
 
-    return buy_signals, sell_signals, status
+    # --- 條件 2: 做空 (Short) ---
+    # 價格 < 50 & 200 EMA 且 Stoch > 80
+    elif (curr['Close'] < curr['EMA_50']) and (curr['Close'] < curr['EMA_200']):
+        if curr['Stoch_Fast'] > 80:
+            setup_type = "SHORT"
+            # 止損設在最近 5 根 K 線的最高點再高一點點
+            swing_high = prev_5['High'].max()
+            stop_loss = swing_high if swing_high > curr['High'] else curr['High'] * 1.005
+            
+            risk = stop_loss - entry_price
+            take_profit = entry_price - (risk * 3) # 3倍盈虧比
+            reason = "趨勢向下 + Stoch超買反彈"
+
+    return setup_type, entry_price, stop_loss, take_profit, reason
 
 # ==========================================
-# 4. 主程式介面
+# 5. 主程式與繪圖
 # ==========================================
-with st.sidebar:
-    symbol = st.text_input("監控代號", value="BTC-USD")
-    timeframe = st.selectbox("週期", ["15m", "1h"], index=0)
-    ema_fast = st.number_input("EMA 快", value=20)
-    ema_mid = st.number_input("EMA 中", value=50)
-    ema_slow = st.number_input("EMA 慢", value=200)
-
-should_run = True if enable_refresh else st.button("🚀 分析圖表")
+should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
 if should_run:
     with st.spinner("計算中..."):
@@ -165,65 +152,91 @@ if should_run:
         if err:
             st.error(err)
         elif df is not None:
-            # 取多一點數據來計算 Pivot，但畫圖只畫最近 60 根
-            buys, sells, status = detect_divergence(df)
+            # 取最近 60 根畫圖
+            plot_df = df.tail(60).copy()
             
-            # 切片取最近 60 根用於顯示
-            plot_df = df.tail(60)
-            plot_buys = buys[-60:]
-            plot_sells = sells[-60:]
-            curr = plot_df.iloc[-1]
-
-            # --- 通知 ---
-            if "背離" in status:
-                st.toast(f"{symbol} 出現 {status}！", icon="🚨")
+            # 分析最新一根是否有訊號
+            setup, entry, sl, tp, reason = analyze_setup(df)
+            
+            # --- 數據看板 ---
+            curr_price = df.iloc[-1]['Close']
+            st.metric("目前價格", f"{curr_price:.2f}")
+            
+            if setup:
+                st.success(f"🔥 訊號觸發：{setup} ({reason})")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("進場價 (Entry)", f"{entry:.2f}")
+                c2.metric("止盈目標 (TP - Green)", f"{tp:.2f}", delta=f"3.0R")
+                c3.metric("止損防守 (SL - Red)", f"{sl:.2f}", delta_color="inverse")
+                
                 if line_token:
-                    send_line_notify(line_token, f"\n【背離訊號】\n{symbol} ({timeframe})\n現價: {curr['Close']:.2f}\n{status}")
+                    send_line_notify(line_token, f"\n【{setup} 訊號】\n{symbol}\n進場: {entry:.2f}\n止盈: {tp:.2f}\n止損: {sl:.2f}")
+            else:
+                st.info("目前無符合 2:45 或 4:45 條件的進場訊號。")
 
-            # --- 數據顯示 ---
-            st.markdown(f"### 🎯 狀態：{status}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("價格", f"{curr['Close']:.2f}")
-            c1.metric("快速 Stoch (9,3)", f"{curr['Stoch_Fast']:.1f}")
-            c2.metric("趨勢 EMA 200", f"{curr['EMA_200']:.2f}")
-
-            # --- 圖例說明 ---
-            with st.expander("📖 點擊查看【線條顏色定義】與【背離條件】", expanded=True):
-                st.markdown("""
-                ### 📊 圖表指標說明
-                *   **主圖 (K線區)：**
-                    *   🟦 **青色 (EMA 20)** | 🟧 **橘色 (EMA 50)** | ⬜ **白色 (EMA 200)**：趨勢參考。
-                *   **副圖 (下方震盪區)：**
-                    *   🟥 **紅色線 (Fast Stoch 9,3)**：**主要背離偵測線**。
-                    *   🟩 **綠色線 (Slow Stoch 60,10)**：長期動量。
-
-                ### 🚦 買賣訊號邏輯 (嚴格背離)
-                | 訊號 | 圖示 | 定義 (Divergence) | 條件 |
-                | :--- | :---: | :--- | :--- |
-                | **看多背離** | ▲ 黃色 | **底背離** | 價格創 **更低** 的低點 (LL) <br> 但紅色 Stoch 創 **更高** 的低點 (HL) <br> (發生在超賣區 < 30) |
-                | **看空背離** | ▼ 紫色 | **頂背離** | 價格創 **更高** 的高點 (HH) <br> 但紅色 Stoch 創 **更低** 的高點 (LH) <br> (發生在超買區 > 70) |
-                """)
-
-            # --- 繪圖 ---
+            # --- 繪圖準備 ---
             apds = [
-                mpf.make_addplot(plot_df['EMA_20'], color='cyan', width=1),
                 mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1.5),
                 mpf.make_addplot(plot_df['EMA_200'], color='white', width=2),
-                
-                mpf.make_addplot(plot_df['Stoch_Fast'], panel=1, color='#FF3333', width=1.5, ylabel='Fast Stoch'),
-                mpf.make_addplot(plot_df['Stoch_Slow'], panel=1, color='#33FF33', width=1.5),
+                mpf.make_addplot(plot_df['Stoch_Fast'], panel=1, color='#FF3333', width=1.5, ylabel='Stoch (9,3)'),
             ]
 
-            # 避免全空值報錯
-            if not np.isnan(plot_buys).all():
-                apds.append(mpf.make_addplot(plot_buys, type='scatter', markersize=100, marker='^', color='yellow'))
-            if not np.isnan(plot_sells).all():
-                apds.append(mpf.make_addplot(plot_sells, type='scatter', markersize=100, marker='v', color='#ff00ff'))
+            # --- 關鍵功能：畫出紅綠止盈止損區塊 (Fill Between) ---
+            # 只有當有訊號時才畫
+            fill_plots = dict()
+            
+            if setup:
+                # 建立兩條水平線數據 (跟 K 線一樣長)
+                tp_line = np.full(len(plot_df), tp)
+                sl_line = np.full(len(plot_df), sl)
+                entry_line = np.full(len(plot_df), entry)
+                
+                # 添加到圖表 (使用 addplot 畫隱形線，然後用 fill_between 填色)
+                apds.append(mpf.make_addplot(tp_line, color='green', width=0.5, linestyle='--'))
+                apds.append(mpf.make_addplot(sl_line, color='red', width=0.5, linestyle='--'))
+                apds.append(mpf.make_addplot(entry_line, color='white', width=0.8, linestyle=':'))
+                
+                # 設定填色區塊
+                # fill_between 需要 y1 和 y2 的值
+                # 這裡我們用 dict 設定，mplfinance 會自動填滿這兩條線中間
+                # 為了避免整個圖都是顏色，我們其實只需要最後幾根，但 mplfinance 限制較多
+                # 這裡我們全圖畫水平帶狀，比較清楚
+                
+                if setup == "LONG":
+                    # 綠色區塊：Entry 到 TP
+                    # 紅色區塊：Entry 到 SL
+                    fill_plots = dict(
+                        hlines=dict(hlines=[entry, tp, sl], colors=['white', 'green', 'red'], linewidths=0.5)
+                    )
+                    # 無法直接在 mpf.plot 用 fill_between 填充水平線，
+                    # 我們改用 addplot 的 fill_between 功能
+                    
+                    # 重新建構：
+                    # 我們需要創造兩個 Series，一個是 TP值，一個是 Entry值
+                    # 然後填色
+                    apds.append(mpf.make_addplot(tp_line, color='g', alpha=0.0)) # 隱形輔助線
+                    apds.append(mpf.make_addplot(entry_line, fill_between=dict(y1=tp_line.tolist(), y2=entry_line.tolist(), color='green', alpha=0.1)))
+                    
+                    apds.append(mpf.make_addplot(sl_line, color='r', alpha=0.0)) # 隱形輔助線
+                    apds.append(mpf.make_addplot(entry_line, fill_between=dict(y1=entry_line.tolist(), y2=sl_line.tolist(), color='red', alpha=0.1)))
 
+                elif setup == "SHORT":
+                    # 綠色區塊：Entry 到 TP (下方)
+                    # 紅色區塊：Entry 到 SL (上方)
+                    apds.append(mpf.make_addplot(tp_line, color='g', alpha=0.0))
+                    apds.append(mpf.make_addplot(entry_line, fill_between=dict(y1=entry_line.tolist(), y2=tp_line.tolist(), color='green', alpha=0.1)))
+                    
+                    apds.append(mpf.make_addplot(sl_line, color='r', alpha=0.0))
+                    apds.append(mpf.make_addplot(entry_line, fill_between=dict(y1=sl_line.tolist(), y2=entry_line.tolist(), color='red', alpha=0.1)))
+
+            # 繪製圖表
             fig, ax = mpf.plot(
                 plot_df, type='candle', style='yahoo', addplot=apds,
-                title=f"{symbol} ({timeframe}) - Divergence",
+                title=f"{symbol} ({timeframe}) Setup Analysis",
                 returnfig=True, volume=False, panel_ratios=(7, 3), tight_layout=True,
                 hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle='--', linewidths=1.0)
             )
             st.pyplot(fig)
+            
+            if setup:
+                st.caption("圖例說明：🟩 綠色半透明區 = 潛在獲利空間 (TP) | 🟥 紅色半透明區 = 風險承擔空間 (SL)")
