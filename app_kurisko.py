@@ -10,7 +10,7 @@ import requests
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (UI 完美對齊版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (間距優化版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -53,7 +53,6 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
-        # 數據抓取
         period = "5d" 
         if interval == "15m": period = "60d" 
         elif interval == "1h": period = "730d" 
@@ -234,12 +233,12 @@ if should_run:
                 volume=False, 
                 panel_ratios=(4, 1, 1, 1, 1),
                 tight_layout=True,
-                # 修正 1: 時間格式 (時:分)
                 datetime_format='%H:%M',
                 xrotation=0,
-                # 修正 2: 拉長圖表 (figscale) 解決刻度重疊
-                figscale=1.35, 
-                hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
+                # 修正重點: 增加 figscale (例如 1.5)，將圖表高度拉長
+                # 這會讓每個 panel 之間的距離物理變大
+                figscale=1.5, 
+                hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.8)
             )
 
             if div_pts:
@@ -248,9 +247,12 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 客製化 Axes (解決刻度重疊) ---
+            # --- 關鍵修正：增加子圖間距 ---
+            # hspace=0.4 代表子圖之間保留 40% 的高度間距
+            # 這能有效分開 0 和 100
+            fig.subplots_adjust(hspace=0.4)
+
             curr_row = plot_df.iloc[-1]
-            
             panels_info = [
                 (2, f"Stoch 9 3 1  {curr_row['K1']:.2f}", '#FF4444'),
                 (4, f"Stoch 14 3 1  {curr_row['K2']:.2f}", '#FF8800'),
@@ -261,15 +263,12 @@ if should_run:
             for ax_idx, label_text, color in panels_info:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
-                    
-                    # 修正 3: 固定 Y 軸刻度並縮小字體
                     ax.set_ylim(0, 100)
                     ax.set_yticks([0, 25, 50, 75, 100])
-                    ax.set_yticklabels([0, 25, 50, 75, 100], fontsize=8) # 字體縮小到 8
+                    # 使用較小的字體 (8) 避免重疊
+                    ax.set_yticklabels([0, 25, 50, 75, 100], fontsize=8) 
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
-                    
-                    # 圖內標籤
                     ax.text(0.01, 0.85, label_text, transform=ax.transAxes, 
                             color=color, fontsize=10, fontweight='bold', ha='left')
 
