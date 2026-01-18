@@ -10,7 +10,7 @@ import requests
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (深色圖表優化版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (穩定除錯版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -41,7 +41,6 @@ def calculate_ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
 def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
-    # 確保數據足夠
     low_min = df['Low'].rolling(window=k_period).min()
     high_max = df['High'].rolling(window=k_period).max()
     denom = high_max - low_min
@@ -54,14 +53,11 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
-        # --- 關鍵修正：極大化數據抓取量 ---
-        # 為了確保 EMA 200 一定算得出來，我們要抓 yfinance 允許的最大值
-        # 15m: max 60 days
-        # 1h: max 730 days
+        # 數據抓取長度設定 (確保 EMA200 算得出來)
         period = "5d" 
-        if interval == "15m": period = "60d" 
-        elif interval == "1h": period = "730d" # 2年
-        elif interval == "4h": period = "730d" # 2年
+        if interval == "15m": period = "1mo" 
+        elif interval == "1h": period = "730d" 
+        elif interval == "4h": period = "730d"
         
         df = yf.download(symbol, period=period, interval=interval, progress=False)
         
@@ -73,12 +69,11 @@ def get_data(symbol, interval):
         
         df = df[df['Close'] > 0].dropna()
 
-        # --- 計算指標 (在裁切數據前計算) ---
+        # 計算指標
         df['EMA_20'] = calculate_ema(df['Close'], 20)
         df['EMA_50'] = calculate_ema(df['Close'], 50)
-        df['EMA_200'] = calculate_ema(df['Close'], 200) # 確保有足夠歷史數據
+        df['EMA_200'] = calculate_ema(df['Close'], 200) 
         
-        # 4組 Stochastics
         df['K1'], df['D1'] = calculate_stoch_kd(df, 9, 3, 1)
         df['K2'], df['D2'] = calculate_stoch_kd(df, 14, 3, 1)
         df['K3'], df['D3'] = calculate_stoch_kd(df, 44, 4, 1)
@@ -129,7 +124,7 @@ def analyze_signals(df):
             reason = "4指標高檔 + 價格破頂 + 指標降低"
             div_points = [(max_price_idx, max_price), (df.index[-1], curr['High'])]
 
-    # --- 策略 B: 趨勢中繼 (含隱性背離) ---
+    # --- 策略 B: 趨勢中繼 ---
     if signal_type is None:
         if (curr['Close'] > curr['EMA_200']) and (curr['K4'] > 50):
             if curr['K1'] < 20: 
@@ -173,7 +168,6 @@ if should_run:
         if err:
             st.error(err)
         elif df is not None:
-            # 畫圖只取最近 60-80 根，這樣 K 線才不會太擠
             plot_df = df.tail(80).copy()
             
             signal, strat_name, reason, entry, sl, tp, div_pts = analyze_signals(df)
@@ -184,7 +178,6 @@ if should_run:
             if signal:
                 color = "green" if signal == "LONG" else "red"
                 st.markdown(f"### 🔥 訊號觸發：:{color}[{signal} - {strat_name}]")
-                
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Entry", f"{entry:.2f}")
                 c2.metric("TP (3R)", f"{tp:.2f}")
@@ -195,74 +188,61 @@ if should_run:
             else:
                 st.info("目前無明確進場訊號。")
 
-            # --- 繪圖設定 (仿照圖片風格) ---
-            # 使用 nightclouds 風格 (深色底)
-            # 設定 5 個面板：0=Main, 1=Stoch1, 2=Stoch2...
-            
+            # --- 繪圖設定 ---
             apds = [
-                # 主圖 EMA (加粗)
-                mpf.make_addplot(plot_df['EMA_20'], color='#00FFFF', width=1.5), # 青色 (20)
-                mpf.make_addplot(plot_df['EMA_50'], color='#FFA500', width=2.0), # 橘色 (50)
-                mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5), # 紫色 (200)
+                mpf.make_addplot(plot_df['EMA_20'], color='cyan', width=1.5),
+                mpf.make_addplot(plot_df['EMA_50'], color='orange', width=2.0),
+                mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
-                # Panel 1: Stoch 9,3 (紅/粉)
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5, ylabel='9,3'),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
                 
-                # Panel 2: Stoch 14,3 (橘/黃)
                 mpf.make_addplot(plot_df['K2'], panel=2, color='#FF8800', width=1.5, ylabel='14,3'),
                 mpf.make_addplot(plot_df['D2'], panel=2, color='#FFCC00', width=1.0),
                 
-                # Panel 3: Stoch 44,4 (藍/青)
                 mpf.make_addplot(plot_df['K3'], panel=3, color='#0088FF', width=1.5, ylabel='44,4'),
                 mpf.make_addplot(plot_df['D3'], panel=3, color='#00FFFF', width=1.0),
                 
-                # Panel 4: Stoch 60,10 (綠/亮綠)
                 mpf.make_addplot(plot_df['K4'], panel=4, color='#00CC00', width=1.5, ylabel='60,10'),
                 mpf.make_addplot(plot_df['D4'], panel=4, color='#66FF66', width=1.0),
             ]
 
-            # 畫止盈止損色塊
+            # 畫止盈止損
             if signal:
                 t_s = np.full(len(plot_df), tp)
                 s_s = np.full(len(plot_df), sl)
                 e_s = np.full(len(plot_df), entry)
                 
-                # 綠色獲利區 (Entry 到 TP)
                 apds.append(mpf.make_addplot(t_s, color='green', width=0.5))
                 apds.append(mpf.make_addplot(e_s, fill_between=dict(y1=t_s.tolist(), y2=e_s.tolist(), color='green', alpha=0.15), width=0))
                 
-                # 紅色虧損區 (Entry 到 SL)
                 apds.append(mpf.make_addplot(s_s, color='red', width=0.5))
                 apds.append(mpf.make_addplot(e_s, fill_between=dict(y1=e_s.tolist(), y2=s_s.tolist(), color='red', alpha=0.15), width=0))
 
-            # 設定背離線
-            alines_config = None
-            if div_pts:
-                # 確保背離線的日期在目前的繪圖範圍內
-                p1_idx, p2_idx = div_pts[0], div_pts[1]
-                # 簡單檢查：如果背離點非常久遠，就不畫了，避免圖表縮太小
-                alines_config = dict(alines=[div_pts], colors='yellow', linewidths=2.5)
-
-            # 自訂樣式：深色背景
-            mc = mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)
-            s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc)
-
-            # 繪製圖表
-            # 關鍵修改：panel_ratios (主圖 : 副圖 : 副圖 : 副圖 : 副圖)
-            # 設為 (3, 1, 1, 1, 1) 代表主圖佔 3份，四個副圖各佔 1份
-            # 這樣副圖會有足夠的空間，不會擠在一起
-            fig, ax = mpf.plot(
-                plot_df, type='candle', style=s, 
+            # --- 關鍵修正：動態構建 kwargs，徹底解決 TypeError ---
+            # 我們先建立基礎的參數字典
+            plot_kwargs = dict(
+                type='candle', 
+                style=mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)), 
                 addplot=apds,
                 title=f"{symbol} ({timeframe}) Quad Rotation",
-                returnfig=True, volume=False, 
-                panel_ratios=(3, 1, 1, 1, 1), 
+                returnfig=True, 
+                volume=False, 
+                panel_ratios=(3, 1, 1, 1, 1), # 確保副圖不擠
                 tight_layout=True,
-                alines=alines_config,
                 hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle=':', linewidths=0.5)
             )
+
+            # 只有當「div_pts 有值」時，才加入 alines 參數
+            # 這能防止 alines=None 導致的錯誤
+            if div_pts:
+                # 轉換為 mplfinance 格式 [(date1, price1), (date2, price2)]
+                line_data = [(div_pts[0], div_pts[2]), (div_pts[1], div_pts[3])]
+                plot_kwargs['alines'] = dict(alines=line_data, colors='yellow', linewidths=2.5, alpha=0.9)
+
+            # 使用 **plot_kwargs 將參數解包傳入
+            fig, ax = mpf.plot(plot_df, **plot_kwargs)
             st.pyplot(fig)
             
             if signal:
-                st.caption("圖表說明：主圖黃線為背離線。紅綠色塊為止損止盈區間。紫色線為 200 EMA (趨勢分界)。")
+                st.caption("圖表說明：主圖黃線為背離線。紅綠色塊為止損止盈。")
