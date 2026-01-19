@@ -1,5 +1,5 @@
 import streamlit as st
-import yfinance as yf
+import ccxt  # 引入專業加密貨幣庫
 import pandas as pd
 import mplfinance as mpf
 import numpy as np
@@ -11,10 +11,11 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (終極修復版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (Binance 數據源)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
+    **數據來源**：Binance (幣安) 現貨數據 (BTC/USDT)。
     **策略 A (反轉)**：四組 Stochastics 同步進入高/低檔並發生背離。
     **策略 B (趨勢)**：EMA 排列正確，配合 Stochastics 動能回調。
     """)
@@ -24,7 +25,8 @@ with st.expander("📖 策略邏輯與參數定義", expanded=False):
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 參數設定")
-    symbol = st.text_input("監控代號", value="BTC-USD")
+    # 改為下拉選單，因為 CCXT 需要標準格式 (例如 BTC/USDT)
+    symbol = st.selectbox("監控代號", ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "DOGE/USDT"])
     timeframe = st.selectbox("週期", ["15m", "1h", "4h"], index=0)
     
     st.markdown("---")
@@ -52,28 +54,28 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
     d_full = k_full.rolling(window=smooth_d).mean()
     return k_full, d_full
 
+# --- 核心修改：改用 CCXT 抓取 Binance 數據 ---
 def get_data(symbol, interval):
     try:
-        period = "5d" 
-        if interval == "15m": period = "5d" 
-        elif interval == "1h": period = "730d" 
-        elif interval == "4h": period = "730d"
+        exchange = ccxt.binance()
+        # 抓取 1000 根 K 線 (Binance API 限制)
+        # 這足夠計算 200 EMA (需要約 200+ 根)
+        limit = 1000 
         
-        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        # 抓取 OHLCV 數據
+        bars = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
         
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        # 轉為 DataFrame
+        df = pd.DataFrame(bars, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Volume'])
         
-        if df.empty: return None, "No Data"
+        # 時間處理 (UTC 毫秒 -> 台灣時間)
+        df['Time'] = pd.to_datetime(df['Time'], unit='ms')
+        df.set_index('Time', inplace=True)
+        df.index = df.index.tz_localize('UTC').tz_convert('Asia/Taipei')
         
-        # 時區處理
-        if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC')
-        else:
-            df.index = df.index.tz_convert('UTC')
-        df.index = df.index.tz_convert('Asia/Taipei')
-
-        df = df[df['Close'] > 0].dropna()
+        # 確保數據類型為 float
+        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        df[numeric_cols] = df[numeric_cols].astype(float)
 
         # 指標計算
         df['EMA_20'] = calculate_ema(df['Close'], 20)
@@ -85,13 +87,15 @@ def get_data(symbol, interval):
         df['K3'], df['D3'] = calculate_stoch_kd(df, 44, 4, 1)
         df['K4'], df['D4'] = calculate_stoch_kd(df, 60, 10, 1)
 
+        # 移除運算初期的 NaN
         df = df.dropna()
         return df, None
+        
     except Exception as e:
-        return None, str(e)
+        return None, f"Binance 連線錯誤: {str(e)}"
 
 # ==========================================
-# 4. 訊號分析
+# 4. 訊號分析 (維持原樣)
 # ==========================================
 
 def analyze_signals(df):
@@ -104,7 +108,6 @@ def analyze_signals(df):
     reason = ""
     div_points = None 
 
-    # 策略 A: 背離
     all_oversold = (curr['K1'] < 35) and (curr['K2'] < 35) and (curr['K3'] < 35) and (curr['K4'] < 35)
     all_overbought = (curr['K1'] > 65) and (curr['K2'] > 65) and (curr['K3'] > 65) and (curr['K4'] > 65)
 
@@ -128,7 +131,6 @@ def analyze_signals(df):
             reason = "價格破頂 + 指標降低"
             div_points = [(max_price_idx, max_price), (df.index[-1], curr['High'])]
 
-    # 策略 B: 趨勢
     if signal_type is None:
         if (curr['Close'] > curr['EMA_200']) and (curr['K4'] > 50):
             if curr['K1'] < 20: 
@@ -161,12 +163,12 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
     except: pass
 
 # ==========================================
-# 5. 主程式與繪圖 (核心修復)
+# 5. 主程式與繪圖 (維持完美排版)
 # ==========================================
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
 if should_run:
-    with st.spinner("計算中..."):
+    with st.spinner("連線 Binance 抓取數據中..."):
         df, err = get_data(symbol, timeframe)
         
         if err:
@@ -176,7 +178,7 @@ if should_run:
             signal, strat_name, reason, entry, sl, tp, div_pts = analyze_signals(df)
             
             curr_price = df.iloc[-1]['Close']
-            st.metric("目前價格", f"{curr_price:.2f}")
+            st.metric("目前價格 (Binance)", f"{curr_price:.2f}")
             
             if signal:
                 color = "green" if signal == "LONG" else "red"
@@ -190,8 +192,6 @@ if should_run:
                 st.info("目前無明確進場訊號。")
 
             # --- 繪圖設定 ---
-            
-            # 透明白帶：20 到 80
             y_20 = np.full(len(plot_df), 20)
             y_80 = np.full(len(plot_df), 80)
 
@@ -202,7 +202,7 @@ if should_run:
                 mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
                 # Panel 1 (9,3)
-                mpf.make_addplot(y_80, panel=1, color='white', width=0), # 隱形邊界
+                mpf.make_addplot(y_80, panel=1, color='white', width=0),
                 mpf.make_addplot(y_20, panel=1, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
@@ -237,16 +237,14 @@ if should_run:
                 type='candle', 
                 style=mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)), 
                 addplot=apds,
-                title=f"{symbol} ({timeframe})",
+                title=f"{symbol} ({timeframe}) - Binance",
                 returnfig=True, 
                 volume=False, 
                 panel_ratios=(3, 1, 1, 1, 1),
                 tight_layout=False, 
                 datetime_format='%H:%M',
                 xrotation=0,
-                figscale=2.2,
-                # 修正 1: 移除 hlines 的設定，完全依賴手動畫線
-                # 這樣就不會自動跑出 20 和 80 的數字了
+                figscale=2.2
             )
 
             if div_pts:
@@ -255,26 +253,20 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 修正 2: 手動設定主圖範圍，防止 K 線消失 ---
-            # 找出主圖 (axlist[0]) 的數據範圍
-            # 計算可見範圍內的 min/max (排除 nan)
+            # --- 手動設定主圖範圍 (防止K線消失) ---
             visible_high = plot_df['High'].max()
             visible_low = plot_df['Low'].min()
-            
-            # 如果有 EMA，也要考慮 EMA 的範圍
             ema_cols = ['EMA_20', 'EMA_50', 'EMA_200']
             for col in ema_cols:
-                # 只考慮非 NaN 的 EMA 值
                 valid_ema = plot_df[col].dropna()
                 if not valid_ema.empty:
                     visible_high = max(visible_high, valid_ema.max())
                     visible_low = min(visible_low, valid_ema.min())
             
-            # 設定緩衝區
             padding = (visible_high - visible_low) * 0.05
             axlist[0].set_ylim(visible_low - padding, visible_high + padding)
 
-            # --- 副圖刻度與畫線 ---
+            # --- 副圖刻度與間距 ---
             fig.subplots_adjust(hspace=0.6)
 
             curr_row = plot_df.iloc[-1]
@@ -288,16 +280,13 @@ if should_run:
             for ax_idx, label_text, color in panels_info:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
-                    
                     ax.set_ylim(0, 100)
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
                     ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6)
                     
-                    # 修正 3: 手動畫 20 和 80 線 (無文字)
+                    # 手動繪製 20, 80 虛線
                     ax.axhline(20, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
                     ax.axhline(80, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
-                    
-                    # 為了視覺對齊，也補上 25 75 的線
                     ax.axhline(25, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
                     ax.axhline(75, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
 
