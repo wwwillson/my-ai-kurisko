@@ -5,13 +5,13 @@ import mplfinance as mpf
 import numpy as np
 from streamlit_autorefresh import st_autorefresh
 import requests
-import matplotlib.ticker as mticker  # 引入刻度控制模組
+import matplotlib.ticker as mticker
 
 # ==========================================
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (強制刻度版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (台灣時間版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -54,8 +54,9 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
+        # 設定抓取週期
         period = "5d" 
-        if interval == "15m": period = "60d" 
+        if interval == "15m": period = "5d"  # 縮短為5天，確保數據最新且穩定
         elif interval == "1h": period = "730d" 
         elif interval == "4h": period = "730d"
         
@@ -65,10 +66,24 @@ def get_data(symbol, interval):
             df.columns = df.columns.get_level_values(0)
         
         if df.empty: return None, "No Data"
-        if df.index.tz is not None: df.index = df.index.tz_localize(None)
-        
-        df = df[df['Close'] > 0].dropna()
 
+        # --- 關鍵修正：時區轉換 (UTC -> Asia/Taipei) ---
+        if df.index.tz is None:
+            # 如果原本沒有時區，先設為 UTC
+            df.index = df.index.tz_localize('UTC')
+        else:
+            # 如果原本有時區，轉為 UTC
+            df.index = df.index.tz_convert('UTC')
+            
+        # 轉為台灣時間
+        df.index = df.index.tz_convert('Asia/Taipei')
+
+        # --- 數據清洗 (解決 K 線圖消失問題) ---
+        # 移除任何價格為 0 或 NaN 的行
+        df = df[df['Close'] > 0]
+        df = df.dropna()
+
+        # 指標計算
         df['EMA_20'] = calculate_ema(df['Close'], 20)
         df['EMA_50'] = calculate_ema(df['Close'], 50)
         df['EMA_200'] = calculate_ema(df['Close'], 200)
@@ -78,6 +93,7 @@ def get_data(symbol, interval):
         df['K3'], df['D3'] = calculate_stoch_kd(df, 44, 4, 1)
         df['K4'], df['D4'] = calculate_stoch_kd(df, 60, 10, 1)
 
+        # 再次清洗計算後的 NaN
         df = df.dropna()
         return df, None
     except Exception as e:
@@ -152,7 +168,7 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
     except: pass
 
 # ==========================================
-# 5. 主程式與繪圖 (核心刻度強制修復)
+# 5. 主程式與繪圖
 # ==========================================
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
@@ -190,25 +206,22 @@ if should_run:
                 mpf.make_addplot(plot_df['EMA_50'], color='#FFA500', width=2.0),
                 mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
-                # Panel 1
+                # Panels
                 mpf.make_addplot(y_75, panel=1, color='white', width=0),
                 mpf.make_addplot(y_25, panel=1, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
                 
-                # Panel 2
                 mpf.make_addplot(y_75, panel=2, color='white', width=0),
                 mpf.make_addplot(y_25, panel=2, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K2'], panel=2, color='#FF8800', width=1.5),
                 mpf.make_addplot(plot_df['D2'], panel=2, color='#FFCC00', width=1.0),
                 
-                # Panel 3
                 mpf.make_addplot(y_75, panel=3, color='white', width=0),
                 mpf.make_addplot(y_25, panel=3, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K3'], panel=3, color='#0088FF', width=1.5),
                 mpf.make_addplot(plot_df['D3'], panel=3, color='#00FFFF', width=1.0),
                 
-                # Panel 4
                 mpf.make_addplot(y_75, panel=4, color='white', width=0),
                 mpf.make_addplot(y_25, panel=4, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K4'], panel=4, color='#00CC00', width=1.5),
@@ -230,11 +243,10 @@ if should_run:
                 returnfig=True, 
                 volume=False, 
                 panel_ratios=(3, 1, 1, 1, 1),
-                tight_layout=True,
+                tight_layout=False, 
                 datetime_format='%H:%M',
                 xrotation=0,
-                figscale=2.0, # 保持高度
-                # 關鍵：這裡只畫輔助線，不讓 mplfinance 自動生成刻度
+                figscale=2.2, 
                 hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
             )
 
@@ -244,10 +256,8 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 終極刻度修正區 ---
-            
-            # 1. 調整垂直間距 (0.8) -> 徹底分開 0 和 100
-            fig.subplots_adjust(hspace=0.8)
+            # --- 修正: 完美間距 & 時區 & 刻度 ---
+            fig.subplots_adjust(hspace=0.6)
 
             curr_row = plot_df.iloc[-1]
             panels_info = [
@@ -261,21 +271,25 @@ if should_run:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
                     
-                    # 2. 強制鎖定刻度 (FixedLocator)
-                    # 這是消滅 "20" 最有效的方法，告訴程式：除了這5個數字，其他都滾開
+                    # 鎖定範圍與刻度
                     ax.set_ylim(0, 100)
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
                     
-                    # 3. 縮小字體 (6)
-                    ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6) 
+                    # 縮小字體並設定間距 (pad)
+                    ax.tick_params(axis='y', labelsize=6, pad=2) 
+                    ax.set_yticklabels(['0', '25', '50', '75', '100'])
                     
-                    # 4. 移除小刻度 (避免干擾)
                     ax.minorticks_off()
-                    
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
                     
-                    ax.text(0.01, 0.8, label_text, transform=ax.transAxes, 
+                    # 關鍵：文字內縮
+                    ticks = ax.get_yticklabels()
+                    if len(ticks) >= 2:
+                        ticks[0].set_verticalalignment('bottom')
+                        ticks[-1].set_verticalalignment('top')
+
+                    ax.text(0.01, 0.85, label_text, transform=ax.transAxes, 
                             color=color, fontsize=9, fontweight='bold', ha='left')
 
             st.pyplot(fig)
