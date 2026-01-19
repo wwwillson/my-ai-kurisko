@@ -11,12 +11,31 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (刻度 20/80 版)")
+st.title("🛡️ John Kurisko 專業操盤系統")
 
-with st.expander("📖 策略邏輯與參數定義", expanded=False):
+# --- 恢復詳細策略邏輯說明 ---
+with st.expander("📖 點擊查看：完整策略邏輯與背離畫線說明", expanded=True):
     st.markdown("""
-    **策略 A (反轉)**：四組 Stochastics 同步進入高/低檔並發生背離。
-    **策略 B (趨勢)**：EMA 排列正確，配合 Stochastics 動能回調。
+    ### 1️⃣ 策略 A：四重共振背離反轉 (Reversal)
+    **核心概念**：利用四個不同週期的動量指標同步極值，捕捉市場力竭後的反轉。
+    *   **環境條件 (四重共振)**：
+        *   **4 組 Stochastics** (9,3 / 14,3 / 44,4 / 60,10) 必須 **全部同時** 進入超賣區 (< 35) 或 超買區 (> 65)。
+    *   **觸發條件 (背離)**：
+        *   **底背離 (做多)**：價格創下 **更低的低點 (Lower Low)**，但快速 Stoch (9,3) 卻創下 **更高的低點 (Higher Low)**。
+        *   **頂背離 (做空)**：價格創下 **更高的高點 (Higher High)**，但快速 Stoch (9,3) 卻創下 **更低的高點 (Lower High)**。
+    *   **圖表互動**：觸發時，自動畫出 **黃色背離線** 以及 **紅綠色止盈止損區**。
+
+    ### 2️⃣ 策略 B：趨勢中繼 (Trend Continuation)
+    **核心概念**：在明確的趨勢中，等待短期動能回調結束後順勢進場 (即牛旗/熊旗)。
+    *   **牛旗 (做多)**：
+        1.  **趨勢濾網**：價格必須在 **200 EMA 之上**。
+        2.  **強度確認**：慢速 Stoch (60,10) 必須維持在 **50 以上**。
+        3.  **進場扳機**：快速 Stoch (9,3) 回調跌破 **20 (超賣區)**。
+    *   **熊旗 (做空)**：
+        1.  **趨勢濾網**：價格必須在 **200 EMA 之下**。
+        2.  **強度確認**：慢速 Stoch (60,10) 必須維持在 **50 以下**。
+        3.  **進場扳機**：快速 Stoch (9,3) 反彈突破 **80 (超買區)**。
+    *   **圖表互動**：觸發時，自動顯示 **紅綠色止盈止損區**。
     """)
 
 # ==========================================
@@ -81,6 +100,7 @@ def get_data(symbol, interval):
 
         df = df[df['Close'] > 0].dropna()
 
+        # 指標
         df['EMA_20'] = calculate_ema(df['Close'], 20)
         df['EMA_50'] = calculate_ema(df['Close'], 50)
         df['EMA_200'] = calculate_ema(df['Close'], 200)
@@ -190,6 +210,7 @@ if should_run:
             if signal:
                 color = "green" if signal == "LONG" else "red"
                 st.markdown(f"### 🔥 訊號觸發：:{color}[{signal} - {strat_name}]")
+                st.caption(f"觸發條件: {reason}")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Entry", f"{entry:.2f}")
                 c2.metric("TP (3R)", f"{tp:.2f}")
@@ -244,7 +265,7 @@ if should_run:
                 type='candle', 
                 style=mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)), 
                 addplot=apds,
-                title=f"{symbol} ({timeframe}) - {plot_count} bars",
+                title=f"{symbol} ({timeframe})",
                 returnfig=True, 
                 volume=False, 
                 panel_ratios=(3, 1, 1, 1, 1),
@@ -260,7 +281,7 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 主圖範圍保護 ---
+            # --- 手動設定範圍與刻度 ---
             visible_high = plot_df['High'].max()
             visible_low = plot_df['Low'].min()
             ema_cols = ['EMA_20', 'EMA_50', 'EMA_200']
@@ -273,7 +294,7 @@ if should_run:
             padding = (visible_high - visible_low) * 0.05
             axlist[0].set_ylim(visible_low - padding, visible_high + padding)
 
-            fig.subplots_adjust(hspace=0.8)
+            fig.subplots_adjust(hspace=0.8) # 保持大間距
 
             curr_row = plot_df.iloc[-1]
             panels_info = [
@@ -287,12 +308,15 @@ if should_run:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
                     
-                    # --- 修正: 刻度只顯示 0, 20, 50, 80, 100 ---
+                    # 強制鎖定刻度 (0, 20, 50, 80, 100)
                     ax.set_ylim(0, 100)
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 20, 50, 80, 100]))
-                    ax.set_yticklabels(['0', '20', '50', '80', '100'], fontsize=6)
                     
-                    # 手畫虛線: 20, 50, 80
+                    # 修正重點: 隱藏 0 和 100 的數字 (設為空字串)，只顯示中間的 20, 50, 80
+                    # 這樣就不會有任何字體重疊的可能，同時保留上下邊界線
+                    ax.set_yticklabels(['', '20', '50', '80', ''], fontsize=6)
+                    
+                    # 手畫虛線
                     ax.axhline(20, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
                     ax.axhline(50, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
                     ax.axhline(80, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
@@ -301,11 +325,6 @@ if should_run:
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
                     
-                    ticks = ax.get_yticklabels()
-                    if len(ticks) >= 2:
-                        ticks[0].set_verticalalignment('bottom')
-                        ticks[-1].set_verticalalignment('top')
-
                     ax.text(0.01, 0.85, label_text, transform=ax.transAxes, 
                             color=color, fontsize=9, fontweight='bold', ha='left')
 
