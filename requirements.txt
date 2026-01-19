@@ -1,7 +1,8 @@
 streamlit
-yfinance
+ccxt
 mplfinance
 pandas
 numpy
 streamlit-autorefresh
 requests
+matplotlib
