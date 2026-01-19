@@ -11,7 +11,7 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (台灣時間版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (最終完美版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -54,9 +54,10 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
-        # 設定抓取週期
+        # 15m 抓 5天 (確保數據最新且運算快)
+        # 1h/4h 抓 730天 (確保 EMA200 準確)
         period = "5d" 
-        if interval == "15m": period = "5d"  # 縮短為5天，確保數據最新且穩定
+        if interval == "15m": period = "5d" 
         elif interval == "1h": period = "730d" 
         elif interval == "4h": period = "730d"
         
@@ -66,24 +67,17 @@ def get_data(symbol, interval):
             df.columns = df.columns.get_level_values(0)
         
         if df.empty: return None, "No Data"
-
-        # --- 關鍵修正：時區轉換 (UTC -> Asia/Taipei) ---
+        
+        # 時區轉換 (UTC -> 台灣)
         if df.index.tz is None:
-            # 如果原本沒有時區，先設為 UTC
             df.index = df.index.tz_localize('UTC')
         else:
-            # 如果原本有時區，轉為 UTC
             df.index = df.index.tz_convert('UTC')
-            
-        # 轉為台灣時間
         df.index = df.index.tz_convert('Asia/Taipei')
 
-        # --- 數據清洗 (解決 K 線圖消失問題) ---
-        # 移除任何價格為 0 或 NaN 的行
-        df = df[df['Close'] > 0]
-        df = df.dropna()
+        df = df[df['Close'] > 0].dropna()
 
-        # 指標計算
+        # 指標
         df['EMA_20'] = calculate_ema(df['Close'], 20)
         df['EMA_50'] = calculate_ema(df['Close'], 50)
         df['EMA_200'] = calculate_ema(df['Close'], 200)
@@ -93,7 +87,7 @@ def get_data(symbol, interval):
         df['K3'], df['D3'] = calculate_stoch_kd(df, 44, 4, 1)
         df['K4'], df['D4'] = calculate_stoch_kd(df, 60, 10, 1)
 
-        # 再次清洗計算後的 NaN
+        # 移除運算產生的空值
         df = df.dropna()
         return df, None
     except Exception as e:
@@ -113,6 +107,7 @@ def analyze_signals(df):
     reason = ""
     div_points = None 
 
+    # --- A. 背離 ---
     all_oversold = (curr['K1'] < 35) and (curr['K2'] < 35) and (curr['K3'] < 35) and (curr['K4'] < 35)
     all_overbought = (curr['K1'] > 65) and (curr['K2'] > 65) and (curr['K3'] > 65) and (curr['K4'] > 65)
 
@@ -136,6 +131,7 @@ def analyze_signals(df):
             reason = "價格破頂 + 指標降低"
             div_points = [(max_price_idx, max_price), (df.index[-1], curr['High'])]
 
+    # --- B. 趨勢 ---
     if signal_type is None:
         if (curr['Close'] > curr['EMA_200']) and (curr['K4'] > 50):
             if curr['K1'] < 20: 
@@ -168,7 +164,7 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
     except: pass
 
 # ==========================================
-# 5. 主程式與繪圖
+# 5. 主程式與繪圖 (核心修復)
 # ==========================================
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
@@ -196,9 +192,10 @@ if should_run:
             else:
                 st.info("目前無明確進場訊號。")
 
-            # --- 繪圖設定 ---
-            y_25 = np.full(len(plot_df), 25)
-            y_75 = np.full(len(plot_df), 75)
+            # --- 繪圖準備 ---
+            # 修正 1: 透明帶改為 20-80
+            y_20 = np.full(len(plot_df), 20)
+            y_80 = np.full(len(plot_df), 80)
 
             apds = [
                 # 主圖
@@ -206,28 +203,33 @@ if should_run:
                 mpf.make_addplot(plot_df['EMA_50'], color='#FFA500', width=2.0),
                 mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
-                # Panels
-                mpf.make_addplot(y_75, panel=1, color='white', width=0),
-                mpf.make_addplot(y_25, panel=1, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
+                # Panel 1 (9,3)
+                mpf.make_addplot(y_80, panel=1, color='white', width=0),
+                mpf.make_addplot(y_20, panel=1, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
                 
-                mpf.make_addplot(y_75, panel=2, color='white', width=0),
-                mpf.make_addplot(y_25, panel=2, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
+                # Panel 2 (14,3)
+                mpf.make_addplot(y_80, panel=2, color='white', width=0),
+                mpf.make_addplot(y_20, panel=2, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K2'], panel=2, color='#FF8800', width=1.5),
                 mpf.make_addplot(plot_df['D2'], panel=2, color='#FFCC00', width=1.0),
                 
-                mpf.make_addplot(y_75, panel=3, color='white', width=0),
-                mpf.make_addplot(y_25, panel=3, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
+                # Panel 3 (44,4)
+                mpf.make_addplot(y_80, panel=3, color='white', width=0),
+                mpf.make_addplot(y_20, panel=3, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K3'], panel=3, color='#0088FF', width=1.5),
                 mpf.make_addplot(plot_df['D3'], panel=3, color='#00FFFF', width=1.0),
                 
-                mpf.make_addplot(y_75, panel=4, color='white', width=0),
-                mpf.make_addplot(y_25, panel=4, fill_between=dict(y1=y_75, y2=y_25, color='white', alpha=0.08), width=0, color='white'),
+                # Panel 4 (60,10)
+                mpf.make_addplot(y_80, panel=4, color='white', width=0),
+                mpf.make_addplot(y_20, panel=4, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K4'], panel=4, color='#00CC00', width=1.5),
                 mpf.make_addplot(plot_df['D4'], panel=4, color='#66FF66', width=1.0),
             ]
 
+            # 修正 2: 只有在有訊號時，才加入止盈止損線
+            # 這是解決「K線圖變一條線」的關鍵！
             if signal:
                 t_s = np.full(len(plot_df), tp); s_s = np.full(len(plot_df), sl); e_s = np.full(len(plot_df), entry)
                 apds.append(mpf.make_addplot(t_s, color='green', width=0.5))
@@ -247,7 +249,8 @@ if should_run:
                 datetime_format='%H:%M',
                 xrotation=0,
                 figscale=2.2, 
-                hlines=dict(hlines=[25, 75], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
+                # 20和80的虛線
+                hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
             )
 
             if div_pts:
@@ -256,7 +259,7 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 修正: 完美間距 & 時區 & 刻度 ---
+            # --- 刻度與間距調整 ---
             fig.subplots_adjust(hspace=0.6)
 
             curr_row = plot_df.iloc[-1]
@@ -271,19 +274,16 @@ if should_run:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
                     
-                    # 鎖定範圍與刻度
+                    # 修正 3: 刻度只顯示 0, 25, 50, 75, 100
                     ax.set_ylim(0, 100)
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
-                    
-                    # 縮小字體並設定間距 (pad)
-                    ax.tick_params(axis='y', labelsize=6, pad=2) 
-                    ax.set_yticklabels(['0', '25', '50', '75', '100'])
+                    ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6)
                     
                     ax.minorticks_off()
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
                     
-                    # 關鍵：文字內縮
+                    # 標籤內縮
                     ticks = ax.get_yticklabels()
                     if len(ticks) >= 2:
                         ticks[0].set_verticalalignment('bottom')
