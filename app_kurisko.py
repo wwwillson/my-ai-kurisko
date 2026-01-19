@@ -11,13 +11,31 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (自訂週期版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (邏輯詳解版)")
 
-with st.expander("📖 策略邏輯與參數定義", expanded=False):
+# --- 修正重點：詳細解釋所有判斷邏輯 ---
+with st.expander("📖 點擊查看：完整策略邏輯與背離畫線說明", expanded=True):
     st.markdown("""
-    **顯示範圍**：15m(24小時) | 1h(6天) | 4h(1個月)。
-    **策略 A (反轉)**：四組 Stochastics 同步進入高/低檔並發生背離。
-    **策略 B (趨勢)**：EMA 排列正確，配合 Stochastics 動能回調。
+    ### 1️⃣ 策略 A：四重共振背離反轉 (Reversal)
+    **核心概念**：利用四個不同週期的動量指標同步極值，捕捉市場力竭後的反轉。
+    *   **環境條件 (四重共振)**：
+        *   **4 組 Stochastics** (9,3 / 14,3 / 44,4 / 60,10) 必須 **全部同時** 進入超賣區 (< 35) 或 超買區 (> 65)。
+    *   **觸發條件 (背離)**：
+        *   **底背離 (做多)**：價格創下 **更低的低點 (Lower Low)**，但快速 Stoch (9,3) 卻創下 **更高的低點 (Higher Low)**。
+        *   **頂背離 (做空)**：價格創下 **更高的高點 (Higher High)**，但快速 Stoch (9,3) 卻創下 **更低的高點 (Lower High)**。
+    *   **圖表互動**：當偵測到此訊號時，系統會自動在主圖 K 線上畫出 **黃色連接線**，標示背離的兩個端點。
+
+    ### 2️⃣ 策略 B：趨勢中繼 (Trend Continuation)
+    **核心概念**：在明確的趨勢中，等待短期動能回調結束後順勢進場 (即牛旗/熊旗)。
+    *   **牛旗 (做多)**：
+        1.  **趨勢濾網**：價格必須在 **200 EMA 之上**。
+        2.  **強度確認**：慢速 Stoch (60,10) 必須維持在 **50 以上** (代表大趨勢強勁)。
+        3.  **進場扳機**：快速 Stoch (9,3) 回調跌破 **20 (超賣區)**。
+    *   **熊旗 (做空)**：
+        1.  **趨勢濾網**：價格必須在 **200 EMA 之下**。
+        2.  **強度確認**：慢速 Stoch (60,10) 必須維持在 **50 以下** (代表大趨勢疲弱)。
+        3.  **進場扳機**：快速 Stoch (9,3) 反彈突破 **80 (超買區)**。
+    *   **圖表互動**：此策略無畫線，但會顯示紅綠色止盈止損區塊。
     """)
 
 # ==========================================
@@ -55,7 +73,7 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
-        limit = 1000 # 抓取足夠多的數據以供裁切
+        limit = 1000 
         bars = []
         try:
             exchange = ccxt.binance()
@@ -112,6 +130,7 @@ def analyze_signals(df):
     reason = ""
     div_points = None 
 
+    # --- 策略 A: 四重共振背離 (Reversal) ---
     all_oversold = (curr['K1'] < 35) and (curr['K2'] < 35) and (curr['K3'] < 35) and (curr['K4'] < 35)
     all_overbought = (curr['K1'] > 65) and (curr['K2'] > 65) and (curr['K3'] > 65) and (curr['K4'] > 65)
 
@@ -119,33 +138,42 @@ def analyze_signals(df):
         min_price_idx = past_df['Low'].idxmin()
         min_price = past_df.loc[min_price_idx, 'Low']
         stoch_at_min = df.loc[min_price_idx, 'K1']
+        
+        # 價格破底 + 指標墊高 = 底背離
         if (curr['Low'] < min_price) and (curr['K1'] > stoch_at_min):
             signal_type = "LONG"
-            strategy_name = "底背離反轉"
-            reason = "價格破底 + 指標墊高"
+            strategy_name = "底背離反轉 (Divergence)"
+            reason = "四重指標低檔 + 價格破底 + Stoch墊高"
+            # 記錄背離點座標 [(時間1, 價格1), (時間2, 價格2)]
             div_points = [(min_price_idx, min_price), (df.index[-1], curr['Low'])]
 
     elif all_overbought:
         max_price_idx = past_df['High'].idxmax()
         max_price = past_df.loc[max_price_idx, 'High']
         stoch_at_max = df.loc[max_price_idx, 'K1']
+        
+        # 價格破頂 + 指標降低 = 頂背離
         if (curr['High'] > max_price) and (curr['K1'] < stoch_at_max):
             signal_type = "SHORT"
-            strategy_name = "頂背離反轉"
-            reason = "價格破頂 + 指標降低"
+            strategy_name = "頂背離反轉 (Divergence)"
+            reason = "四重指標高檔 + 價格破頂 + Stoch降低"
             div_points = [(max_price_idx, max_price), (df.index[-1], curr['High'])]
 
+    # --- 策略 B: 趨勢中繼 (Trend) ---
     if signal_type is None:
+        # 牛旗
         if (curr['Close'] > curr['EMA_200']) and (curr['K4'] > 50):
             if curr['K1'] < 20: 
                 signal_type = "LONG"
-                strategy_name = "趨勢牛旗"
-                reason = "順勢回調買點"
+                strategy_name = "趨勢牛旗 (Bull Flag)"
+                reason = "價格>200EMA + 慢速強(>50) + 快速回調(<20)"
+        
+        # 熊旗
         elif (curr['Close'] < curr['EMA_200']) and (curr['K4'] < 50):
             if curr['K1'] > 80: 
                 signal_type = "SHORT"
-                strategy_name = "趨勢熊旗"
-                reason = "順勢反彈空點"
+                strategy_name = "趨勢熊旗 (Bear Flag)"
+                reason = "價格<200EMA + 慢速弱(<50) + 快速反彈(>80)"
 
     entry = curr['Close']
     sl = 0.0; tp = 0.0
@@ -178,14 +206,10 @@ if should_run:
         if err:
             st.error(err)
         elif df is not None:
-            
-            # --- 修正: 根據週期設定顯示範圍 ---
-            if timeframe == "15m":
-                plot_count = 96   # 24小時 (4*24)
-            elif timeframe == "1h":
-                plot_count = 144  # 6天 (6*24)
-            else: # 4h
-                plot_count = 180  # 1個月 (30*6)
+            # 依據週期決定 K 線數量
+            if timeframe == "15m": plot_count = 96
+            elif timeframe == "1h": plot_count = 144
+            else: plot_count = 180
             
             plot_df = df.tail(plot_count).copy()
             
@@ -196,6 +220,7 @@ if should_run:
             if signal:
                 color = "green" if signal == "LONG" else "red"
                 st.markdown(f"### 🔥 訊號觸發：:{color}[{signal} - {strat_name}]")
+                st.caption(f"觸發條件: {reason}") # 顯示詳細原因
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Entry", f"{entry:.2f}")
                 c2.metric("TP (3R)", f"{tp:.2f}")
@@ -204,7 +229,7 @@ if should_run:
             else:
                 st.info("目前無明確進場訊號。")
 
-            # --- 繪圖設定 (保持完美版樣式) ---
+            # --- 繪圖設定 ---
             y_20 = np.full(len(plot_df), 20)
             y_80 = np.full(len(plot_df), 80)
 
@@ -250,18 +275,19 @@ if should_run:
                 type='candle', 
                 style=mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)), 
                 addplot=apds,
-                title=f"{symbol} ({timeframe}) - {plot_count} bars",
+                title=f"{symbol} ({timeframe})",
                 returnfig=True, 
                 volume=False, 
                 panel_ratios=(3, 1, 1, 1, 1),
                 tight_layout=False, 
-                datetime_format='%m/%d %H:%M', # 修正: 顯示日期時間，因為 1h/4h 跨度較大
+                datetime_format='%H:%M',
                 xrotation=0,
                 figscale=2.2
             )
 
             if div_pts:
                 line_data = [(div_pts[0], div_pts[2]), (div_pts[1], div_pts[3])]
+                # 畫出黃色背離線
                 plot_kwargs['alines'] = dict(alines=line_data, colors='yellow', linewidths=2.5, alpha=0.9)
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
@@ -296,7 +322,6 @@ if should_run:
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
                     ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6)
                     
-                    # 虛線
                     ax.axhline(20, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
                     ax.axhline(80, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
                     ax.axhline(25, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
