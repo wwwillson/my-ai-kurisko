@@ -11,11 +11,11 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (Binance US 修復版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (自訂週期版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
-    **數據來源**：Binance / Binance US (自動切換)。
+    **顯示範圍**：15m(24小時) | 1h(6天) | 4h(1個月)。
     **策略 A (反轉)**：四組 Stochastics 同步進入高/低檔並發生背離。
     **策略 B (趨勢)**：EMA 排列正確，配合 Stochastics 動能回調。
     """)
@@ -53,48 +53,36 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
     d_full = k_full.rolling(window=smooth_d).mean()
     return k_full, d_full
 
-# --- 核心修改：加入自動切換 Binance US 的機制 ---
 def get_data(symbol, interval):
     try:
-        limit = 1000
+        limit = 1000 # 抓取足夠多的數據以供裁切
         bars = []
-        
-        # 1. 優先嘗試連接 Binance Global
         try:
             exchange = ccxt.binance()
             bars = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
         except Exception as e:
-            error_msg = str(e)
-            # 2. 如果遇到 451 (地區限制) 或連線問題，切換到 Binance US
-            if "451" in error_msg or "Service unavailable" in error_msg:
-                # print("切換至 Binance US...") # Debug用
+            if "451" in str(e) or "Service unavailable" in str(e):
                 exchange = ccxt.binanceus() 
                 bars = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
             else:
-                raise e # 如果是其他錯誤 (如代號錯誤) 則拋出
+                raise e
 
-        # 轉為 DataFrame
         df = pd.DataFrame(bars, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Volume'])
-        
-        # 時間處理
         df['Time'] = pd.to_datetime(df['Time'], unit='ms')
         df.set_index('Time', inplace=True)
         
-        # 時區處理 (UTC -> 台灣)
         if df.index.tz is None:
             df.index = df.index.tz_localize('UTC')
         else:
             df.index = df.index.tz_convert('UTC')
         df.index = df.index.tz_convert('Asia/Taipei')
         
-        # 確保數據類型
         numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         df[numeric_cols] = df[numeric_cols].astype(float)
 
-        # 數據清洗
         df = df[df['Close'] > 0].dropna()
 
-        # 指標計算
+        # 指標
         df['EMA_20'] = calculate_ema(df['Close'], 20)
         df['EMA_50'] = calculate_ema(df['Close'], 50)
         df['EMA_200'] = calculate_ema(df['Close'], 200)
@@ -111,7 +99,7 @@ def get_data(symbol, interval):
         return None, f"數據獲取失敗: {str(e)}"
 
 # ==========================================
-# 4. 訊號分析 (維持原樣)
+# 4. 訊號分析
 # ==========================================
 
 def analyze_signals(df):
@@ -179,7 +167,7 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
     except: pass
 
 # ==========================================
-# 5. 主程式與繪圖 (維持視覺優化)
+# 5. 主程式與繪圖
 # ==========================================
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
@@ -189,12 +177,19 @@ if should_run:
         
         if err:
             st.error(err)
-            if "451" in str(err):
-                st.warning("提示：Streamlit 伺服器位於美國，已被幣安全球站封鎖。程式已嘗試切換至 Binance US，如果仍然失敗，請稍後再試。")
         elif df is not None:
-            plot_df = df.tail(80).copy()
-            signal, strat_name, reason, entry, sl, tp, div_pts = analyze_signals(df)
             
+            # --- 修正: 根據週期設定顯示範圍 ---
+            if timeframe == "15m":
+                plot_count = 96   # 24小時 (4*24)
+            elif timeframe == "1h":
+                plot_count = 144  # 6天 (6*24)
+            else: # 4h
+                plot_count = 180  # 1個月 (30*6)
+            
+            plot_df = df.tail(plot_count).copy()
+            
+            signal, strat_name, reason, entry, sl, tp, div_pts = analyze_signals(df)
             curr_price = df.iloc[-1]['Close']
             st.metric("目前價格 (Binance)", f"{curr_price:.2f}")
             
@@ -209,30 +204,35 @@ if should_run:
             else:
                 st.info("目前無明確進場訊號。")
 
-            # --- 繪圖設定 (保持之前的完美版) ---
+            # --- 繪圖設定 (保持完美版樣式) ---
             y_20 = np.full(len(plot_df), 20)
             y_80 = np.full(len(plot_df), 80)
 
             apds = [
+                # 主圖
                 mpf.make_addplot(plot_df['EMA_20'], color='#00FFFF', width=1.5),
                 mpf.make_addplot(plot_df['EMA_50'], color='#FFA500', width=2.0),
                 mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
+                # Panel 1 (9,3)
                 mpf.make_addplot(y_80, panel=1, color='white', width=0),
                 mpf.make_addplot(y_20, panel=1, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
                 
+                # Panel 2 (14,3)
                 mpf.make_addplot(y_80, panel=2, color='white', width=0),
                 mpf.make_addplot(y_20, panel=2, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K2'], panel=2, color='#FF8800', width=1.5),
                 mpf.make_addplot(plot_df['D2'], panel=2, color='#FFCC00', width=1.0),
                 
+                # Panel 3 (44,4)
                 mpf.make_addplot(y_80, panel=3, color='white', width=0),
                 mpf.make_addplot(y_20, panel=3, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K3'], panel=3, color='#0088FF', width=1.5),
                 mpf.make_addplot(plot_df['D3'], panel=3, color='#00FFFF', width=1.0),
                 
+                # Panel 4 (60,10)
                 mpf.make_addplot(y_80, panel=4, color='white', width=0),
                 mpf.make_addplot(y_20, panel=4, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K4'], panel=4, color='#00CC00', width=1.5),
@@ -250,12 +250,12 @@ if should_run:
                 type='candle', 
                 style=mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)), 
                 addplot=apds,
-                title=f"{symbol} ({timeframe}) - Binance",
+                title=f"{symbol} ({timeframe}) - {plot_count} bars",
                 returnfig=True, 
                 volume=False, 
                 panel_ratios=(3, 1, 1, 1, 1),
                 tight_layout=False, 
-                datetime_format='%H:%M',
+                datetime_format='%m/%d %H:%M', # 修正: 顯示日期時間，因為 1h/4h 跨度較大
                 xrotation=0,
                 figscale=2.2
             )
@@ -296,7 +296,7 @@ if should_run:
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
                     ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6)
                     
-                    # 手畫 20, 80 虛線
+                    # 虛線
                     ax.axhline(20, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
                     ax.axhline(80, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
                     ax.axhline(25, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
