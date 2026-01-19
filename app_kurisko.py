@@ -11,7 +11,7 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (最終完美版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (終極修復版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -54,8 +54,6 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
-        # 15m 抓 5天 (確保數據最新且運算快)
-        # 1h/4h 抓 730天 (確保 EMA200 準確)
         period = "5d" 
         if interval == "15m": period = "5d" 
         elif interval == "1h": period = "730d" 
@@ -68,7 +66,7 @@ def get_data(symbol, interval):
         
         if df.empty: return None, "No Data"
         
-        # 時區轉換 (UTC -> 台灣)
+        # 時區處理
         if df.index.tz is None:
             df.index = df.index.tz_localize('UTC')
         else:
@@ -77,7 +75,7 @@ def get_data(symbol, interval):
 
         df = df[df['Close'] > 0].dropna()
 
-        # 指標
+        # 指標計算
         df['EMA_20'] = calculate_ema(df['Close'], 20)
         df['EMA_50'] = calculate_ema(df['Close'], 50)
         df['EMA_200'] = calculate_ema(df['Close'], 200)
@@ -87,7 +85,6 @@ def get_data(symbol, interval):
         df['K3'], df['D3'] = calculate_stoch_kd(df, 44, 4, 1)
         df['K4'], df['D4'] = calculate_stoch_kd(df, 60, 10, 1)
 
-        # 移除運算產生的空值
         df = df.dropna()
         return df, None
     except Exception as e:
@@ -107,7 +104,7 @@ def analyze_signals(df):
     reason = ""
     div_points = None 
 
-    # --- A. 背離 ---
+    # 策略 A: 背離
     all_oversold = (curr['K1'] < 35) and (curr['K2'] < 35) and (curr['K3'] < 35) and (curr['K4'] < 35)
     all_overbought = (curr['K1'] > 65) and (curr['K2'] > 65) and (curr['K3'] > 65) and (curr['K4'] > 65)
 
@@ -131,7 +128,7 @@ def analyze_signals(df):
             reason = "價格破頂 + 指標降低"
             div_points = [(max_price_idx, max_price), (df.index[-1], curr['High'])]
 
-    # --- B. 趨勢 ---
+    # 策略 B: 趨勢
     if signal_type is None:
         if (curr['Close'] > curr['EMA_200']) and (curr['K4'] > 50):
             if curr['K1'] < 20: 
@@ -192,8 +189,9 @@ if should_run:
             else:
                 st.info("目前無明確進場訊號。")
 
-            # --- 繪圖準備 ---
-            # 修正 1: 透明帶改為 20-80
+            # --- 繪圖設定 ---
+            
+            # 透明白帶：20 到 80
             y_20 = np.full(len(plot_df), 20)
             y_80 = np.full(len(plot_df), 80)
 
@@ -204,7 +202,7 @@ if should_run:
                 mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
                 # Panel 1 (9,3)
-                mpf.make_addplot(y_80, panel=1, color='white', width=0),
+                mpf.make_addplot(y_80, panel=1, color='white', width=0), # 隱形邊界
                 mpf.make_addplot(y_20, panel=1, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
@@ -228,8 +226,6 @@ if should_run:
                 mpf.make_addplot(plot_df['D4'], panel=4, color='#66FF66', width=1.0),
             ]
 
-            # 修正 2: 只有在有訊號時，才加入止盈止損線
-            # 這是解決「K線圖變一條線」的關鍵！
             if signal:
                 t_s = np.full(len(plot_df), tp); s_s = np.full(len(plot_df), sl); e_s = np.full(len(plot_df), entry)
                 apds.append(mpf.make_addplot(t_s, color='green', width=0.5))
@@ -248,9 +244,9 @@ if should_run:
                 tight_layout=False, 
                 datetime_format='%H:%M',
                 xrotation=0,
-                figscale=2.2, 
-                # 20和80的虛線
-                hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
+                figscale=2.2,
+                # 修正 1: 移除 hlines 的設定，完全依賴手動畫線
+                # 這樣就不會自動跑出 20 和 80 的數字了
             )
 
             if div_pts:
@@ -259,7 +255,26 @@ if should_run:
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 刻度與間距調整 ---
+            # --- 修正 2: 手動設定主圖範圍，防止 K 線消失 ---
+            # 找出主圖 (axlist[0]) 的數據範圍
+            # 計算可見範圍內的 min/max (排除 nan)
+            visible_high = plot_df['High'].max()
+            visible_low = plot_df['Low'].min()
+            
+            # 如果有 EMA，也要考慮 EMA 的範圍
+            ema_cols = ['EMA_20', 'EMA_50', 'EMA_200']
+            for col in ema_cols:
+                # 只考慮非 NaN 的 EMA 值
+                valid_ema = plot_df[col].dropna()
+                if not valid_ema.empty:
+                    visible_high = max(visible_high, valid_ema.max())
+                    visible_low = min(visible_low, valid_ema.min())
+            
+            # 設定緩衝區
+            padding = (visible_high - visible_low) * 0.05
+            axlist[0].set_ylim(visible_low - padding, visible_high + padding)
+
+            # --- 副圖刻度與畫線 ---
             fig.subplots_adjust(hspace=0.6)
 
             curr_row = plot_df.iloc[-1]
@@ -274,16 +289,22 @@ if should_run:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
                     
-                    # 修正 3: 刻度只顯示 0, 25, 50, 75, 100
                     ax.set_ylim(0, 100)
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
                     ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6)
                     
+                    # 修正 3: 手動畫 20 和 80 線 (無文字)
+                    ax.axhline(20, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
+                    ax.axhline(80, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
+                    
+                    # 為了視覺對齊，也補上 25 75 的線
+                    ax.axhline(25, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+                    ax.axhline(75, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+
                     ax.minorticks_off()
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
                     
-                    # 標籤內縮
                     ticks = ax.get_yticklabels()
                     if len(ticks) >= 2:
                         ticks[0].set_verticalalignment('bottom')
