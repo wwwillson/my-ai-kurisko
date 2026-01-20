@@ -11,7 +11,7 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統 (圖表強制鎖定版)")
+st.title("🛡️ John Kurisko 專業操盤系統 (背離雙線版)")
 
 with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
@@ -54,7 +54,6 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
-        # 時間長度設定
         period = "5d" 
         if interval == "15m": period = "5d" 
         elif interval == "1h": period = "730d" 
@@ -67,7 +66,6 @@ def get_data(symbol, interval):
         
         if df.empty: return None, "No Data"
         
-        # 時區
         if df.index.tz is None: df.index = df.index.tz_localize('UTC')
         else: df.index = df.index.tz_convert('UTC')
         df.index = df.index.tz_convert('Asia/Taipei')
@@ -115,7 +113,8 @@ def analyze_signals(df):
             signal_type = "LONG"
             strategy_name = "底背離反轉"
             reason = "價格破底 + 指標墊高"
-            div_points = (min_price_idx, df.index[-1], min_price, curr['Low'])
+            # 修正: 多存入 K1 的數值，以便畫圖 (t1, t2, p1, p2, k1, k2)
+            div_points = (min_price_idx, df.index[-1], min_price, curr['Low'], stoch_at_min, curr['K1'])
 
     elif all_overbought:
         max_price_idx = past_df['High'].idxmax()
@@ -125,7 +124,8 @@ def analyze_signals(df):
             signal_type = "SHORT"
             strategy_name = "頂背離反轉"
             reason = "價格破頂 + 指標降低"
-            div_points = (max_price_idx, df.index[-1], max_price, curr['High'])
+            # 修正: 多存入 K1 的數值
+            div_points = (max_price_idx, df.index[-1], max_price, curr['High'], stoch_at_max, curr['K1'])
 
     # --- B. 趨勢 ---
     if signal_type is None:
@@ -160,7 +160,7 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
     except: pass
 
 # ==========================================
-# 5. 主程式與繪圖 (核心修復)
+# 5. 主程式與繪圖 (核心功能新增)
 # ==========================================
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
@@ -189,35 +189,29 @@ if should_run:
                 st.info("目前無明確進場訊號。")
 
             # --- 繪圖設定 ---
-            # 修正 1: 透明帶改為 20-80
             y_20 = np.full(len(plot_df), 20)
             y_80 = np.full(len(plot_df), 80)
 
             apds = [
-                # 主圖
                 mpf.make_addplot(plot_df['EMA_20'], color='#00FFFF', width=1.5),
                 mpf.make_addplot(plot_df['EMA_50'], color='#FFA500', width=2.0),
                 mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
-                # Panel 1 (9,3)
                 mpf.make_addplot(y_80, panel=1, color='white', width=0),
                 mpf.make_addplot(y_20, panel=1, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
                 
-                # Panel 2 (14,3)
                 mpf.make_addplot(y_80, panel=2, color='white', width=0),
                 mpf.make_addplot(y_20, panel=2, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K2'], panel=2, color='#FF8800', width=1.5),
                 mpf.make_addplot(plot_df['D2'], panel=2, color='#FFCC00', width=1.0),
                 
-                # Panel 3 (44,4)
                 mpf.make_addplot(y_80, panel=3, color='white', width=0),
                 mpf.make_addplot(y_20, panel=3, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K3'], panel=3, color='#0088FF', width=1.5),
                 mpf.make_addplot(plot_df['D3'], panel=3, color='#00FFFF', width=1.0),
                 
-                # Panel 4 (60,10)
                 mpf.make_addplot(y_80, panel=4, color='white', width=0),
                 mpf.make_addplot(y_20, panel=4, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K4'], panel=4, color='#00CC00', width=1.5),
@@ -231,19 +225,13 @@ if should_run:
                 apds.append(mpf.make_addplot(s_s, color='red', width=0.5))
                 apds.append(mpf.make_addplot(e_s, fill_between=dict(y1=e_s.tolist(), y2=s_s.tolist(), color='red', alpha=0.15), width=0))
 
-            # --- 修正 2: 計算主圖 Y 軸範圍 (解決圖表被壓縮消失問題) ---
-            # 找出這80根K線的最高與最低，並加一點緩衝
+            # 鎖定主圖範圍
             price_max = plot_df['High'].max()
             price_min = plot_df['Low'].min()
-            # 如果有訊號，也要把 TP/SL 納入範圍考慮
             if signal:
                 price_max = max(price_max, tp, sl)
                 price_min = min(price_min, tp, sl)
             
-            # 加上 2% 緩衝
-            y_limit_top = price_max * 1.02
-            y_limit_bottom = price_min * 0.98
-
             plot_kwargs = dict(
                 type='candle', 
                 style=mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mpf.make_marketcolors(up='#00ff00', down='#ff0000', inherit=True)), 
@@ -256,22 +244,39 @@ if should_run:
                 datetime_format='%H:%M',
                 xrotation=0,
                 figscale=2.2, 
-                # 關鍵修正: 強制鎖定主圖範圍
-                ylim=(y_limit_bottom, y_limit_top),
+                ylim=(price_min*0.999, price_max*1.001), # 鎖定Y軸
                 hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
             )
 
             if div_pts:
-                # 確保背離線數值有效 (大於0)
-                if div_pts[2] > 0 and div_pts[3] > 0:
-                    line_data = [(div_pts[0], div_pts[2]), (div_pts[1], div_pts[3])]
-                    plot_kwargs['alines'] = dict(alines=line_data, colors='yellow', linewidths=2.5, alpha=0.9)
+                # 這裡只畫主圖的線 (價格背離)
+                # t1, t2, p1, p2, k1, k2
+                line_data = [(div_pts[0], div_pts[2]), (div_pts[1], div_pts[3])]
+                plot_kwargs['alines'] = dict(alines=line_data, colors='yellow', linewidths=2.5, alpha=0.9)
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 刻度與間距調整 ---
-            fig.subplots_adjust(hspace=0.6)
+            # --- 關鍵新增：手動在 Stoch 9,3,1 (Panel 1) 畫背離線 ---
+            if div_pts:
+                # 取得座標: 時間1, 時間2, K值1, K值2
+                t1, t2 = div_pts[0], div_pts[1]
+                k1, k2 = div_pts[4], div_pts[5]
+                
+                try:
+                    # 轉換時間索引為整數 X 軸座標
+                    x1 = plot_df.index.get_loc(t1)
+                    x2 = plot_df.index.get_loc(t2)
+                    
+                    # axlist[2] 是 Panel 1 (Stoch 9,3)
+                    # 畫黃色粗線
+                    axlist[2].plot([x1, x2], [k1, k2], color='yellow', linewidth=2.5, alpha=0.9)
+                except Exception:
+                    # 防止背離點超出顯示範圍導致報錯
+                    pass
 
+            # --- 刻度與間距 ---
+            fig.subplots_adjust(hspace=0.8) # 拉大間距
+            
             curr_row = plot_df.iloc[-1]
             panels_info = [
                 (2, f"Stoch 9 3 1  {curr_row['K1']:.2f}", '#FF4444'),
@@ -283,12 +288,9 @@ if should_run:
             for ax_idx, label_text, color in panels_info:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
-                    
-                    # 修正 3: 刻度只顯示 0, 25, 50, 75, 100
                     ax.set_ylim(0, 100)
                     ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
                     ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6)
-                    
                     ax.minorticks_off()
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
@@ -304,4 +306,4 @@ if should_run:
             st.pyplot(fig)
             
             if signal:
-                st.caption("圖表說明：主圖黃線為背離線。紅綠色塊為止損止盈。")
+                st.caption("圖表說明：主圖與第一副圖的黃線為背離線。紅綠色塊為止損止盈。")
