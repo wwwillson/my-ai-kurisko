@@ -1,5 +1,5 @@
 import streamlit as st
-import ccxt
+import yfinance as yf
 import pandas as pd
 import mplfinance as mpf
 import numpy as np
@@ -11,31 +11,12 @@ import matplotlib.ticker as mticker
 # 1. 頁面設定
 # ==========================================
 st.set_page_config(layout="wide", page_title="John Kurisko 專業操盤系統")
-st.title("🛡️ John Kurisko 專業操盤系統")
+st.title("🛡️ John Kurisko 專業操盤系統 (訊號修復版)")
 
-# --- 恢復詳細策略邏輯說明 ---
-with st.expander("📖 點擊查看：完整策略邏輯與背離畫線說明", expanded=True):
+with st.expander("📖 策略邏輯與參數定義", expanded=False):
     st.markdown("""
-    ### 1️⃣ 策略 A：四重共振背離反轉 (Reversal)
-    **核心概念**：利用四個不同週期的動量指標同步極值，捕捉市場力竭後的反轉。
-    *   **環境條件 (四重共振)**：
-        *   **4 組 Stochastics** (9,3 / 14,3 / 44,4 / 60,10) 必須 **全部同時** 進入超賣區 (< 35) 或 超買區 (> 65)。
-    *   **觸發條件 (背離)**：
-        *   **底背離 (做多)**：價格創下 **更低的低點 (Lower Low)**，但快速 Stoch (9,3) 卻創下 **更高的低點 (Higher Low)**。
-        *   **頂背離 (做空)**：價格創下 **更高的高點 (Higher High)**，但快速 Stoch (9,3) 卻創下 **更低的高點 (Lower High)**。
-    *   **圖表互動**：觸發時，自動畫出 **黃色背離線** 以及 **紅綠色止盈止損區**。
-
-    ### 2️⃣ 策略 B：趨勢中繼 (Trend Continuation)
-    **核心概念**：在明確的趨勢中，等待短期動能回調結束後順勢進場 (即牛旗/熊旗)。
-    *   **牛旗 (做多)**：
-        1.  **趨勢濾網**：價格必須在 **200 EMA 之上**。
-        2.  **強度確認**：慢速 Stoch (60,10) 必須維持在 **50 以上**。
-        3.  **進場扳機**：快速 Stoch (9,3) 回調跌破 **20 (超賣區)**。
-    *   **熊旗 (做空)**：
-        1.  **趨勢濾網**：價格必須在 **200 EMA 之下**。
-        2.  **強度確認**：慢速 Stoch (60,10) 必須維持在 **50 以下**。
-        3.  **進場扳機**：快速 Stoch (9,3) 反彈突破 **80 (超買區)**。
-    *   **圖表互動**：觸發時，自動顯示 **紅綠色止盈止損區**。
+    **策略 A (反轉)**：四組 Stochastics 同步進入高/低檔並發生背離。
+    **策略 B (趨勢)**：EMA 排列正確，配合 Stochastics 動能回調。
     """)
 
 # ==========================================
@@ -43,7 +24,7 @@ with st.expander("📖 點擊查看：完整策略邏輯與背離畫線說明", 
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 參數設定")
-    symbol = st.selectbox("監控代號", ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "DOGE/USDT"])
+    symbol = st.text_input("監控代號", value="BTC-USD")
     timeframe = st.selectbox("週期", ["15m", "1h", "4h"], index=0)
     
     st.markdown("---")
@@ -73,30 +54,23 @@ def calculate_stoch_kd(df, k_period, smooth_k, smooth_d):
 
 def get_data(symbol, interval):
     try:
-        limit = 1000 
-        bars = []
-        try:
-            exchange = ccxt.binance()
-            bars = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
-        except Exception as e:
-            if "451" in str(e) or "Service unavailable" in str(e):
-                exchange = ccxt.binanceus() 
-                bars = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
-            else:
-                raise e
-
-        df = pd.DataFrame(bars, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Volume'])
-        df['Time'] = pd.to_datetime(df['Time'], unit='ms')
-        df.set_index('Time', inplace=True)
+        period = "5d" 
+        if interval == "15m": period = "5d" 
+        elif interval == "1h": period = "730d" 
+        elif interval == "4h": period = "730d"
+        
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        
+        if df.empty: return None, "No Data"
         
         if df.index.tz is None:
             df.index = df.index.tz_localize('UTC')
         else:
             df.index = df.index.tz_convert('UTC')
         df.index = df.index.tz_convert('Asia/Taipei')
-        
-        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        df[numeric_cols] = df[numeric_cols].astype(float)
 
         df = df[df['Close'] > 0].dropna()
 
@@ -112,12 +86,11 @@ def get_data(symbol, interval):
 
         df = df.dropna()
         return df, None
-        
     except Exception as e:
-        return None, f"數據獲取失敗: {str(e)}"
+        return None, str(e)
 
 # ==========================================
-# 4. 訊號分析
+# 4. 訊號分析 (關鍵修正區)
 # ==========================================
 
 def analyze_signals(df):
@@ -130,6 +103,7 @@ def analyze_signals(df):
     reason = ""
     div_points = None 
 
+    # --- A. 背離 ---
     all_oversold = (curr['K1'] < 35) and (curr['K2'] < 35) and (curr['K3'] < 35) and (curr['K4'] < 35)
     all_overbought = (curr['K1'] > 65) and (curr['K2'] > 65) and (curr['K3'] > 65) and (curr['K4'] > 65)
 
@@ -137,22 +111,27 @@ def analyze_signals(df):
         min_price_idx = past_df['Low'].idxmin()
         min_price = past_df.loc[min_price_idx, 'Low']
         stoch_at_min = df.loc[min_price_idx, 'K1']
+        
         if (curr['Low'] < min_price) and (curr['K1'] > stoch_at_min):
             signal_type = "LONG"
             strategy_name = "底背離反轉"
             reason = "價格破底 + 指標墊高"
-            div_points = [(min_price_idx, min_price), (df.index[-1], curr['Low'])]
+            # 修正: 儲存為 4 個元素的扁平 tuple (t1, t2, p1, p2)
+            div_points = (min_price_idx, df.index[-1], min_price, curr['Low'])
 
     elif all_overbought:
         max_price_idx = past_df['High'].idxmax()
         max_price = past_df.loc[max_price_idx, 'High']
         stoch_at_max = df.loc[max_price_idx, 'K1']
+        
         if (curr['High'] > max_price) and (curr['K1'] < stoch_at_max):
             signal_type = "SHORT"
             strategy_name = "頂背離反轉"
             reason = "價格破頂 + 指標降低"
-            div_points = [(max_price_idx, max_price), (df.index[-1], curr['High'])]
+            # 修正: 儲存為 4 個元素的扁平 tuple
+            div_points = (max_price_idx, df.index[-1], max_price, curr['High'])
 
+    # --- B. 趨勢 ---
     if signal_type is None:
         if (curr['Close'] > curr['EMA_200']) and (curr['K4'] > 50):
             if curr['K1'] < 20: 
@@ -190,27 +169,23 @@ def send_line_notify_wrapper(token, strat, symbol, direction, price):
 should_run = True if enable_refresh else st.button("🚀 分析最新訊號")
 
 if should_run:
-    with st.spinner("連線 Binance 抓取數據中..."):
+    with st.spinner("計算中..."):
         df, err = get_data(symbol, timeframe)
         
         if err:
             st.error(err)
         elif df is not None:
-            
-            if timeframe == "15m": plot_count = 96
-            elif timeframe == "1h": plot_count = 144
-            else: plot_count = 180
-            
-            plot_df = df.tail(plot_count).copy()
-            
+            plot_df = df.tail(80).copy()
             signal, strat_name, reason, entry, sl, tp, div_pts = analyze_signals(df)
+            
             curr_price = df.iloc[-1]['Close']
-            st.metric("目前價格 (Binance)", f"{curr_price:.2f}")
+            st.metric(f"目前價格 ({'Binance' if 'BTC' in symbol else 'Market'})", f"{curr_price:.2f}")
             
             if signal:
                 color = "green" if signal == "LONG" else "red"
                 st.markdown(f"### 🔥 訊號觸發：:{color}[{signal} - {strat_name}]")
                 st.caption(f"觸發條件: {reason}")
+                
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Entry", f"{entry:.2f}")
                 c2.metric("TP (3R)", f"{tp:.2f}")
@@ -229,31 +204,32 @@ if should_run:
                 mpf.make_addplot(plot_df['EMA_50'], color='#FFA500', width=2.0),
                 mpf.make_addplot(plot_df['EMA_200'], color='#9932CC', width=2.5),
                 
-                # Panel 1 (9,3)
+                # Panel 1
                 mpf.make_addplot(y_80, panel=1, color='white', width=0),
                 mpf.make_addplot(y_20, panel=1, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K1'], panel=1, color='#FF4444', width=1.5),
                 mpf.make_addplot(plot_df['D1'], panel=1, color='#FF9999', width=1.0),
                 
-                # Panel 2 (14,3)
+                # Panel 2
                 mpf.make_addplot(y_80, panel=2, color='white', width=0),
                 mpf.make_addplot(y_20, panel=2, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K2'], panel=2, color='#FF8800', width=1.5),
                 mpf.make_addplot(plot_df['D2'], panel=2, color='#FFCC00', width=1.0),
                 
-                # Panel 3 (44,4)
+                # Panel 3
                 mpf.make_addplot(y_80, panel=3, color='white', width=0),
                 mpf.make_addplot(y_20, panel=3, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K3'], panel=3, color='#0088FF', width=1.5),
                 mpf.make_addplot(plot_df['D3'], panel=3, color='#00FFFF', width=1.0),
                 
-                # Panel 4 (60,10)
+                # Panel 4
                 mpf.make_addplot(y_80, panel=4, color='white', width=0),
                 mpf.make_addplot(y_20, panel=4, fill_between=dict(y1=y_80, y2=y_20, color='white', alpha=0.08), width=0, color='white'),
                 mpf.make_addplot(plot_df['K4'], panel=4, color='#00CC00', width=1.5),
                 mpf.make_addplot(plot_df['D4'], panel=4, color='#66FF66', width=1.0),
             ]
 
+            # 修正: 確保 t_s, s_s 等變數只在有訊號時加入，避免畫出 0 值
             if signal:
                 t_s = np.full(len(plot_df), tp); s_s = np.full(len(plot_df), sl); e_s = np.full(len(plot_df), entry)
                 apds.append(mpf.make_addplot(t_s, color='green', width=0.5))
@@ -272,29 +248,20 @@ if should_run:
                 tight_layout=False, 
                 datetime_format='%H:%M',
                 xrotation=0,
-                figscale=2.2
+                figscale=2.2, 
+                hlines=dict(hlines=[20, 80], colors=['gray', 'gray'], linestyle='--', linewidths=0.5)
             )
 
+            # 修正: 正確解包扁平的 tuple
             if div_pts:
+                # div_pts 現在是 (t1, t2, p1, p2)，可以直接用 index 存取
                 line_data = [(div_pts[0], div_pts[2]), (div_pts[1], div_pts[3])]
                 plot_kwargs['alines'] = dict(alines=line_data, colors='yellow', linewidths=2.5, alpha=0.9)
 
             fig, axlist = mpf.plot(plot_df, **plot_kwargs)
 
-            # --- 手動設定範圍與刻度 ---
-            visible_high = plot_df['High'].max()
-            visible_low = plot_df['Low'].min()
-            ema_cols = ['EMA_20', 'EMA_50', 'EMA_200']
-            for col in ema_cols:
-                valid_ema = plot_df[col].dropna()
-                if not valid_ema.empty:
-                    visible_high = max(visible_high, valid_ema.max())
-                    visible_low = min(visible_low, valid_ema.min())
-            
-            padding = (visible_high - visible_low) * 0.05
-            axlist[0].set_ylim(visible_low - padding, visible_high + padding)
-
-            fig.subplots_adjust(hspace=0.8) # 保持大間距
+            # --- 刻度與間距調整 ---
+            fig.subplots_adjust(hspace=0.6)
 
             curr_row = plot_df.iloc[-1]
             panels_info = [
@@ -308,23 +275,20 @@ if should_run:
                 if ax_idx < len(axlist):
                     ax = axlist[ax_idx]
                     
-                    # 強制鎖定刻度 (0, 20, 50, 80, 100)
+                    # 強制刻度 0, 25, 50, 75, 100
                     ax.set_ylim(0, 100)
-                    ax.yaxis.set_major_locator(mticker.FixedLocator([0, 20, 50, 80, 100]))
+                    ax.yaxis.set_major_locator(mticker.FixedLocator([0, 25, 50, 75, 100]))
+                    ax.set_yticklabels(['0', '25', '50', '75', '100'], fontsize=6)
                     
-                    # 修正重點: 隱藏 0 和 100 的數字 (設為空字串)，只顯示中間的 20, 50, 80
-                    # 這樣就不會有任何字體重疊的可能，同時保留上下邊界線
-                    ax.set_yticklabels(['', '20', '50', '80', ''], fontsize=6)
-                    
-                    # 手畫虛線
-                    ax.axhline(20, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
-                    ax.axhline(50, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
-                    ax.axhline(80, color='gray', linestyle='--', linewidth=0.5, alpha=0.5)
-
                     ax.minorticks_off()
                     ax.yaxis.tick_right()
                     ax.set_ylabel("")
                     
+                    ticks = ax.get_yticklabels()
+                    if len(ticks) >= 2:
+                        ticks[0].set_verticalalignment('bottom')
+                        ticks[-1].set_verticalalignment('top')
+
                     ax.text(0.01, 0.85, label_text, transform=ax.transAxes, 
                             color=color, fontsize=9, fontweight='bold', ha='left')
 
